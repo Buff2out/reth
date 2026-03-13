@@ -185,6 +185,13 @@ Storage:
 
           [default: 8]
 
+      --download-segments <DOWNLOAD_SEGMENTS>
+          Number of parallel segments per file download.
+
+          Uses HTTP Range requests to download each file in parallel segments, matching aria2c-style parallelism. Set to 1 to disable segmented downloads. Ignored when the server does not support Range requests.
+
+          [default: 16]
+
       --list
           List available snapshots and exit.
 

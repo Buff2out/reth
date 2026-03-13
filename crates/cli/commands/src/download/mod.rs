@@ -52,6 +52,12 @@ const DOWNLOAD_CACHE_DIR: &str = ".download-cache";
 /// Maximum number of concurrent archive downloads.
 const MAX_CONCURRENT_DOWNLOADS: usize = 8;
 
+/// Default number of parallel segments per individual file download.
+const DEFAULT_DOWNLOAD_SEGMENTS: usize = 16;
+
+/// Maximum retry attempts for a single download segment.
+const SEGMENT_RETRY_ATTEMPTS: u32 = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SelectionPreset {
     Minimal,
@@ -273,6 +279,14 @@ pub struct DownloadCommand<C: ChainSpecParser> {
     #[arg(long, default_value_t = MAX_CONCURRENT_DOWNLOADS)]
     download_concurrency: usize,
 
+    /// Number of parallel segments per file download.
+    ///
+    /// Uses HTTP Range requests to download each file in parallel segments,
+    /// matching aria2c-style parallelism. Set to 1 to disable segmented
+    /// downloads. Ignored when the server does not support Range requests.
+    #[arg(long, default_value_t = DEFAULT_DOWNLOAD_SEGMENTS)]
+    download_segments: usize,
+
     /// List available snapshots and exit.
     ///
     /// Queries the snapshots API and prints all available snapshots for the selected chain,
@@ -311,6 +325,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
                 data_dir.data_dir(),
                 None,
                 self.resumable,
+                self.download_segments.max(1),
                 cancel_token.clone(),
             )
             .await?;
@@ -383,7 +398,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
                 .then_with(|| a.archive.file_name.cmp(&b.archive.file_name))
         });
 
-        let download_cache_dir = if self.resumable {
+        let download_cache_dir = if self.resumable || self.download_segments > 1 {
             let dir = target_dir.join(DOWNLOAD_CACHE_DIR);
             fs::create_dir_all(&dir)?;
             Some(dir)
@@ -421,6 +436,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         let cache_dir = download_cache_dir;
         let resumable = self.resumable;
         let download_concurrency = self.download_concurrency.max(1);
+        let download_segments = self.download_segments.max(1);
         let results: Vec<Result<()>> = stream::iter(all_downloads)
             .map(|planned| {
                 let dir = target.clone();
@@ -434,6 +450,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
                         cache.as_deref(),
                         Some(sp),
                         resumable,
+                        download_segments,
                         ct,
                     )
                     .await?;
@@ -1312,6 +1329,211 @@ fn resumable_download(
         .unwrap_or_else(|| eyre::eyre!("Download failed after {} attempts", MAX_DOWNLOAD_RETRIES)))
 }
 
+/// Downloads a single segment of a file using an HTTP Range request.
+///
+/// Writes data at the correct offset in the `.part` file and updates the shared
+/// progress counter. Retries up to [`SEGMENT_RETRY_ATTEMPTS`] times on failure.
+fn download_segment(
+    url: &str,
+    part_path: &Path,
+    start: u64,
+    end: u64,
+    shared: Option<&Arc<SharedProgress>>,
+    cancel_token: &CancellationToken,
+) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+
+    let expected_len = end - start + 1;
+    let client = BlockingClient::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(3600))
+        .build()?;
+
+    for attempt in 1..=SEGMENT_RETRY_ATTEMPTS {
+        if cancel_token.is_cancelled() {
+            return Err(eyre::eyre!("Download cancelled"));
+        }
+
+        let response = match client
+            .get(url)
+            .header(RANGE, format!("bytes={start}-{end}"))
+            .send()
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if attempt == SEGMENT_RETRY_ATTEMPTS {
+                    return Err(e.into());
+                }
+                std::thread::sleep(Duration::from_secs(RETRY_BACKOFF_SECS));
+                continue;
+            }
+        };
+
+        if response.status() != StatusCode::PARTIAL_CONTENT {
+            return Err(eyre::eyre!(
+                "Server returned {} instead of 206 for Range request",
+                response.status()
+            ));
+        }
+
+        let file = OpenOptions::new().write(true).open(part_path)?;
+
+        let mut buf = [0u8; 64 * 1024];
+        // Cap reads to expected segment length to prevent overwriting adjacent segments
+        let mut reader = response.take(expected_len);
+        let mut offset = start;
+        let mut segment_ok = true;
+        loop {
+            if cancel_token.is_cancelled() {
+                return Err(eyre::eyre!("Download cancelled"));
+            }
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    file.write_all_at(&buf[..n], offset)?;
+                    offset += n as u64;
+                    if let Some(sp) = shared {
+                        sp.add(n as u64);
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    if attempt == SEGMENT_RETRY_ATTEMPTS {
+                        return Err(e.into());
+                    }
+                    segment_ok = false;
+                    break;
+                }
+            }
+        }
+
+        if segment_ok {
+            return Ok(());
+        }
+
+        std::thread::sleep(Duration::from_secs(RETRY_BACKOFF_SECS));
+    }
+
+    Err(eyre::eyre!("Segment download failed after {SEGMENT_RETRY_ATTEMPTS} attempts"))
+}
+
+/// Downloads a file using parallel HTTP Range requests.
+///
+/// The file is split into `num_segments` segments that are fetched concurrently
+/// via [`tokio::task::spawn_blocking`]. Falls back to [`resumable_download`]
+/// when the server does not support Range requests or the file is too small.
+fn parallel_segmented_download(
+    url: &str,
+    target_dir: &Path,
+    num_segments: usize,
+    shared: Option<&Arc<SharedProgress>>,
+    cancel_token: CancellationToken,
+) -> Result<(PathBuf, u64)> {
+    let file_name = Url::parse(url)
+        .ok()
+        .and_then(|u| u.path_segments()?.next_back().map(|s| s.to_string()))
+        .unwrap_or_else(|| "snapshot.tar".to_string());
+
+    let final_path = target_dir.join(&file_name);
+    let part_path = target_dir.join(format!("{file_name}.part"));
+
+    let client = BlockingClient::builder().connect_timeout(Duration::from_secs(30)).build()?;
+
+    // Probe with a single-byte Range GET to discover total size and range support.
+    // More reliable than checking Accept-Ranges on a HEAD response, since some
+    // servers support ranges but don't advertise it in HEAD.
+    let probe =
+        client.get(url).header(RANGE, "bytes=0-0").send().and_then(|r| r.error_for_status());
+
+    let (supports_ranges, total_size) = match probe {
+        Ok(resp) if resp.status() == StatusCode::PARTIAL_CONTENT => {
+            let total = resp
+                .headers()
+                .get("Content-Range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split('/').next_back())
+                .and_then(|v| v.parse::<u64>().ok());
+            (true, total)
+        }
+        _ => {
+            let head = client.head(url).send()?.error_for_status()?;
+            (false, head.content_length())
+        }
+    };
+
+    let total_size = total_size.ok_or_else(|| eyre::eyre!("Server did not return file size"))?;
+
+    if !supports_ranges || total_size == 0 {
+        info!(target: "reth::cli",
+            "Server does not support Range requests, falling back to sequential download"
+        );
+        return resumable_download(url, target_dir, shared, cancel_token);
+    }
+
+    // At least 1 MB per segment to avoid excessive overhead
+    let actual_segments = num_segments.min(total_size as usize / (1024 * 1024)).max(1);
+    let segment_size = total_size / actual_segments as u64;
+
+    info!(target: "reth::cli",
+        total_size = %DownloadProgress::format_size(total_size),
+        segments = actual_segments,
+        "Starting parallel segmented download"
+    );
+
+    // Pre-allocate the .part file
+    {
+        let file = fs::create_file(&part_path)?;
+        file.set_len(total_size)?;
+    }
+
+    let url = url.to_string();
+    let errors: Arc<std::sync::Mutex<Vec<eyre::Error>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    // Download segments in parallel using a scoped thread pool
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(actual_segments);
+
+        for i in 0..actual_segments {
+            let start = i as u64 * segment_size;
+            let end = if i == actual_segments - 1 {
+                total_size - 1
+            } else {
+                (i as u64 + 1) * segment_size - 1
+            };
+
+            let url = &url;
+            let part_path = &part_path;
+            let errors = Arc::clone(&errors);
+            let ct = &cancel_token;
+
+            handles.push(scope.spawn(move || {
+                if let Err(e) = download_segment(url, part_path, start, end, shared, ct) {
+                    errors.lock().unwrap().push(e);
+                }
+            }));
+        }
+
+        for handle in handles {
+            let _ = handle.join();
+        }
+    });
+
+    let errs = errors.lock().unwrap();
+    if !errs.is_empty() {
+        let msg = format!("Parallel download failed: {}", errs[0]);
+        drop(errs);
+        let _ = std::fs::remove_file(&part_path);
+        return Err(eyre::eyre!(msg));
+    }
+    drop(errs);
+
+    fs::rename(&part_path, &final_path)?;
+    info!(target: "reth::cli", file = %file_name, "Download complete");
+    Ok((final_path, total_size))
+}
+
 /// Streams a remote archive directly into the extractor without writing to disk.
 ///
 /// On failure, retries from scratch up to [`MAX_DOWNLOAD_RETRIES`] times.
@@ -1405,11 +1627,21 @@ fn download_and_extract(
     format: CompressionFormat,
     target_dir: &Path,
     shared: Option<&Arc<SharedProgress>>,
+    download_segments: usize,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let quiet = shared.is_some();
-    let (downloaded_path, total_size) =
-        resumable_download(url, target_dir, shared, cancel_token.clone())?;
+    let (downloaded_path, total_size) = if download_segments > 1 {
+        parallel_segmented_download(
+            url,
+            target_dir,
+            download_segments,
+            shared,
+            cancel_token.clone(),
+        )?
+    } else {
+        resumable_download(url, target_dir, shared, cancel_token.clone())?
+    };
 
     let file_name =
         downloaded_path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
@@ -1453,6 +1685,7 @@ fn blocking_download_and_extract(
     target_dir: &Path,
     shared: Option<Arc<SharedProgress>>,
     resumable: bool,
+    download_segments: usize,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let format = CompressionFormat::from_url(url)?;
@@ -1470,8 +1703,15 @@ fn blocking_download_and_extract(
             sp.archive_done();
         }
         result
-    } else if resumable {
-        download_and_extract(url, format, target_dir, shared.as_ref(), cancel_token)
+    } else if resumable || download_segments > 1 {
+        download_and_extract(
+            url,
+            format,
+            target_dir,
+            shared.as_ref(),
+            download_segments,
+            cancel_token,
+        )
     } else {
         let result =
             streaming_download_and_extract(url, format, target_dir, shared.as_ref(), cancel_token);
@@ -1494,12 +1734,20 @@ async fn stream_and_extract(
     target_dir: &Path,
     shared: Option<Arc<SharedProgress>>,
     resumable: bool,
+    download_segments: usize,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let target_dir = target_dir.to_path_buf();
     let url = url.to_string();
     task::spawn_blocking(move || {
-        blocking_download_and_extract(&url, &target_dir, shared, resumable, cancel_token)
+        blocking_download_and_extract(
+            &url,
+            &target_dir,
+            shared,
+            resumable,
+            download_segments,
+            cancel_token,
+        )
     })
     .await??;
 
@@ -1512,6 +1760,7 @@ async fn process_modular_archive(
     cache_dir: Option<&Path>,
     shared: Option<Arc<SharedProgress>>,
     resumable: bool,
+    download_segments: usize,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let target_dir = target_dir.to_path_buf();
@@ -1524,6 +1773,7 @@ async fn process_modular_archive(
             cache_dir.as_deref(),
             shared,
             resumable,
+            download_segments,
             cancel_token,
         )
     })
@@ -1538,6 +1788,7 @@ fn blocking_process_modular_archive(
     cache_dir: Option<&Path>,
     shared: Option<Arc<SharedProgress>>,
     resumable: bool,
+    download_segments: usize,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let archive = &planned.archive;
@@ -1555,16 +1806,25 @@ fn blocking_process_modular_archive(
     for attempt in 1..=MAX_DOWNLOAD_RETRIES {
         cleanup_output_files(target_dir, &archive.output_files);
 
-        if resumable {
+        if resumable || download_segments > 1 {
             let cache_dir = cache_dir.ok_or_else(|| eyre::eyre!("Missing cache directory"))?;
             let archive_path = cache_dir.join(&archive.file_name);
             let part_path = cache_dir.join(format!("{}.part", archive.file_name));
-            let result =
+            let result = (if download_segments > 1 {
+                parallel_segmented_download(
+                    &archive.url,
+                    cache_dir,
+                    download_segments,
+                    shared.as_ref(),
+                    cancel_token.clone(),
+                )
+            } else {
                 resumable_download(&archive.url, cache_dir, shared.as_ref(), cancel_token.clone())
-                    .and_then(|(downloaded_path, _)| {
-                        let file = fs::open(&downloaded_path)?;
-                        extract_archive_raw(file, format, target_dir)
-                    });
+            })
+            .and_then(|(downloaded_path, _)| {
+                let file = fs::open(&downloaded_path)?;
+                extract_archive_raw(file, format, target_dir)
+            });
             let _ = fs::remove_file(&archive_path);
             let _ = fs::remove_file(&part_path);
 
