@@ -602,7 +602,6 @@ where
         let max_hot_slots = self.sparse_trie_max_hot_slots;
         let max_hot_accounts = self.sparse_trie_max_hot_accounts;
         let disable_cache_pruning = self.disable_sparse_trie_cache_pruning;
-        let enable_arena_sparse_trie = self.enable_arena_sparse_trie;
         let executor = self.executor.clone();
 
         let parent_span = Span::current();
@@ -1083,7 +1082,7 @@ impl PayloadExecutionCache {
     /// This is useful for synchronization before starting payload processing.
     ///
     /// Returns the time spent waiting for the lock.
-    pub fn wait_for_availability(&self) -> Duration {
+    pub(crate) fn wait_for_availability(&self) -> Duration {
         let start = Instant::now();
         // Acquire write lock to wait for any current holders to finish
         let _guard = self.inner.write();
@@ -1111,7 +1110,7 @@ impl PayloadExecutionCache {
     ///
     /// Violating this requirement can result in cache corruption, incorrect state data,
     /// and potential consensus failures.
-    pub fn update_with_guard<F>(&self, update_fn: F)
+    pub(crate) fn update_with_guard<F>(&self, update_fn: F)
     where
         F: FnOnce(&mut Option<SavedCache>),
     {

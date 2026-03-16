@@ -30,7 +30,7 @@ use reth_trie_parallel::{
 use reth_trie_sparse::debug_recorder::TrieDebugRecorder;
 use reth_trie_sparse::{
     errors::SparseTrieResult, ConfigurableSparseTrie, DeferredDrops, LeafUpdate,
-    RevealableSparseTrie, SparseTrie,
+    RevealableSparseTrie,
 };
 use revm_primitives::{hash_map::Entry, B256Map};
 use tracing::{debug, debug_span, error, instrument, trace_span};
@@ -626,60 +626,6 @@ impl SparseTrieCacheTask {
         for address in addresses_to_compute_roots {
             if let Some(trie) = self.trie.storage_tries_mut().get_mut(&address)
                 && !trie.is_root_cached()
-            {
-                tries_to_compute_roots.push((address, SendStorageTriePtr(trie)));
-            }
-        }
-
-        let parent_span = tracing::Span::current();
-        tries_to_compute_roots.into_par_iter().for_each(|(address, SendStorageTriePtr(trie))| {
-            let _enter = debug_span!(
-                target: "engine::tree::payload_processor::sparse_trie",
-                parent: &parent_span,
-                "storage_root",
-                ?address
-            )
-            .entered();
-            // SAFETY:
-            // - pointers are created from `storage_tries_mut().get_mut(address)` above;
-            // - `addresses_to_compute_roots` comes from map iteration, so addresses are unique;
-            // - we do not insert/remove entries between pointer collection and use, so pointers
-            //   stay valid and map reallocation cannot occur;
-            // - each pointer is consumed by at most one rayon task, so no aliasing mutable access.
-            unsafe { (*trie).root().expect("updates are drained, trie should be revealed by now") };
-        });
-    }
-
-    /// Computes storage roots for accounts whose storage updates are fully drained.
-    ///
-    /// For each storage trie T that:
-    /// 1. was modified in the current block,
-    /// 2. all the storage updates are fully drained,
-    /// 3. but the storage root hasn't been updated yet,
-    ///
-    /// we trigger state root computation on a rayon pool.
-    #[instrument(
-        level = "debug",
-        target = "engine::tree::payload_processor::sparse_trie",
-        skip_all
-    )]
-    fn compute_drained_storage_roots(&mut self) {
-        let addresses_to_compute_roots: Vec<_> = self
-            .storage_updates
-            .iter()
-            .filter_map(|(address, updates)| updates.is_empty().then_some(*address))
-            .collect();
-
-        struct SendStorageTriePtr<S>(*mut RevealableSparseTrie<S>);
-        // SAFETY: this wrapper only forwards the pointer across rayon; deref invariants are
-        // documented at the use site below.
-        unsafe impl<S: Send> Send for SendStorageTriePtr<S> {}
-
-        let mut tries_to_compute_roots: Vec<(B256, SendStorageTriePtr<S>)> =
-            Vec::with_capacity(addresses_to_compute_roots.len());
-        for address in addresses_to_compute_roots {
-            if let Some(trie) = self.trie.storage_tries_mut().get_mut(&address) &&
-                !trie.is_root_cached()
             {
                 tries_to_compute_roots.push((address, SendStorageTriePtr(trie)));
             }
