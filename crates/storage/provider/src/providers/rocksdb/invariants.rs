@@ -21,7 +21,7 @@ use std::collections::HashSet;
 
 /// Batch size for changeset iteration during history healing.
 /// Balances memory usage against iteration overhead.
-const HEAL_HISTORY_BATCH_SIZE: u64 = 10_000;
+const HEAL_HISTORY_BATCH_SIZE: u64 = 1_000;
 
 impl RocksDBProvider {
     /// Checks consistency of `RocksDB` tables against MDBX stage checkpoints.
