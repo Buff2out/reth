@@ -194,7 +194,6 @@ impl EngineNodeLauncher {
         };
         let validator_builder = add_ons.engine_validator_builder();
 
-        // Create launcher-owned engine shared caches (following ChangesetCache pattern)
         let shared_caches = EngineSharedCaches::default();
 
         // Build the engine validator with all required components
