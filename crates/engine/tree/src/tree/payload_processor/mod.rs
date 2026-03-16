@@ -751,7 +751,8 @@ where
 ///
 /// Created once by the node launcher and threaded through the engine validator build path.
 /// Destructured by [`PayloadProcessor::new()`] into private fields.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EngineSharedCaches<Evm: ConfigureEvm> {
     /// Execution cache handle.
     pub execution_cache: PayloadExecutionCache,
