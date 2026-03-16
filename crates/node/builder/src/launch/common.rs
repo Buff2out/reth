@@ -412,6 +412,58 @@ impl<R, ChainSpec: EthChainSpec> LaunchContextWith<Attached<WithConfigs<ChainSpe
         self.node_config().dev.dev
     }
 
+    /// Launches the prometheus endpoint as early as possible, without database metrics hooks.
+    ///
+    /// This starts the metrics HTTP server (serving `/metrics`, `/debug/pprof/heap`,
+    /// `/debug/tokio/dump`) before the database and provider factory are initialized,
+    /// making profiling endpoints available during long startup phases like consistency
+    /// checks.
+    ///
+    /// Convenience function to [`Self::start_prometheus_endpoint_early`]
+    pub async fn with_prometheus_server_early(self) -> eyre::Result<Self> {
+        self.start_prometheus_endpoint_early().await?;
+        Ok(self)
+    }
+
+    /// Starts the prometheus endpoint without database metrics hooks.
+    ///
+    /// Unlike [`start_prometheus_endpoint`](LaunchContextWith::start_prometheus_endpoint),
+    /// this can be called before the provider factory is available. Database-specific metrics
+    /// hooks (DB size, static file, RocksDB stats) will not be included; use
+    /// [`start_prometheus_endpoint`](LaunchContextWith::start_prometheus_endpoint) if you need
+    /// those and the provider factory is available.
+    pub async fn start_prometheus_endpoint_early(&self) -> eyre::Result<()> {
+        // ensure recorder runs upkeep periodically
+        install_prometheus_recorder().spawn_upkeep();
+
+        let listen_addr = self.node_config().metrics.prometheus;
+        if let Some(addr) = listen_addr {
+            let config = MetricServerConfig::new(
+                addr,
+                VersionInfo {
+                    version: version_metadata().cargo_pkg_version.as_ref(),
+                    build_timestamp: version_metadata().vergen_build_timestamp.as_ref(),
+                    cargo_features: version_metadata().vergen_cargo_features.as_ref(),
+                    git_sha: version_metadata().vergen_git_sha.as_ref(),
+                    target_triple: version_metadata().vergen_cargo_target_triple.as_ref(),
+                    build_profile: version_metadata().build_profile_name.as_ref(),
+                },
+                ChainSpecInfo { name: self.chain_id().to_string() },
+                self.task_executor().clone(),
+                Hooks::builder().build(),
+                self.data_dir().pprof_dumps(),
+            )
+            .with_push_gateway(
+                self.node_config().metrics.push_gateway_url.clone(),
+                self.node_config().metrics.push_gateway_interval,
+            );
+
+            MetricServer::new(config).serve().await?;
+        }
+
+        Ok(())
+    }
+
     /// Returns the configured [`PruneConfig`]
     ///
     /// Any configuration set in CLI will take precedence over those set in toml

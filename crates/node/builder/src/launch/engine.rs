@@ -102,12 +102,15 @@ impl EngineNodeLauncher {
             .attach(database.clone())
             // ensure certain settings take effect
             .with_adjusted_configs()
+            // Start the metrics server early so profiling endpoints (e.g.
+            // /debug/pprof/heap) are available during potentially long
+            // startup phases like database consistency checks.
+            .with_prometheus_server_early().await?
             // Create the provider factory with changeset cache
             .with_provider_factory::<_, <CB::Components as NodeComponents<T>>::Evm>(changeset_cache.clone(), rocksdb_provider).await?
             .inspect(|_| {
                 info!(target: "reth::cli", "Database opened");
             })
-            .with_prometheus_server().await?
             .inspect(|this| {
                 debug!(target: "reth::cli", chain=%this.chain_id(), genesis=?this.genesis_hash(), "Initializing genesis");
             })
