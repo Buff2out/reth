@@ -749,9 +749,8 @@ where
 
 /// Launcher-owned cache bundle shared across engine payload processing.
 ///
-/// Created once by the node launcher and threaded through the engine validator build path,
-/// following the same ownership pattern as `ChangesetCache`. Destructured by
-/// [`PayloadProcessor::new()`] into private fields.
+/// Created once by the node launcher and threaded through the engine validator build path.
+/// Destructured by [`PayloadProcessor::new()`] into private fields.
 #[derive(Debug)]
 pub struct EngineSharedCaches<Evm: ConfigureEvm> {
     /// Execution cache handle.
