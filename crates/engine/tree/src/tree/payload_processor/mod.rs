@@ -598,13 +598,13 @@ where
                         let account_trie = RevealableSparseTrie::blind_from(
                             ConfigurableSparseTrie::Arena(
                                 ArenaParallelSparseTrie::default()
-                                    .with_update_leaves_cache_depth(4),
+                                    .with_update_leaves_cache_depth(3),
                             ),
                         );
                         let storage_trie = RevealableSparseTrie::blind_from(
                             ConfigurableSparseTrie::Arena(
                                 ArenaParallelSparseTrie::default()
-                                    .with_update_leaves_cache_depth(3),
+                                    .with_update_leaves_cache_depth(2),
                             ),
                         );
                         SparseStateTrie::default()
