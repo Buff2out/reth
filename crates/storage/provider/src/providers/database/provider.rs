@@ -3296,10 +3296,21 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HistoryWriter for DatabaseProvi
         &self,
         account_transitions: impl IntoIterator<Item = (Address, impl IntoIterator<Item = u64>)>,
     ) -> ProviderResult<()> {
-        self.append_history_index::<_, tables::AccountsHistory>(
-            account_transitions,
-            ShardedKey::new,
-        )
+        if self.cached_storage_settings().storage_v2 {
+            self.with_rocksdb_batch(|mut batch| {
+                for (address, blocks) in account_transitions {
+                    batch.append_account_history_shard(address, blocks)?;
+                }
+                Ok(((), Some(batch.into_inner())))
+            })?;
+            self.commit_pending_rocksdb_batches()?;
+            Ok(())
+        } else {
+            self.append_history_index::<_, tables::AccountsHistory>(
+                account_transitions,
+                ShardedKey::new,
+            )
+        }
     }
 
     fn unwind_storage_history_indices(
@@ -3357,26 +3368,32 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HistoryWriter for DatabaseProvi
         &self,
         storage_transitions: impl IntoIterator<Item = ((Address, B256), impl IntoIterator<Item = u64>)>,
     ) -> ProviderResult<()> {
-        self.append_history_index::<_, tables::StoragesHistory>(
-            storage_transitions,
-            |(address, storage_key), highest_block_number| {
-                StorageShardedKey::new(address, storage_key, highest_block_number)
-            },
-        )
+        if self.cached_storage_settings().storage_v2 {
+            self.with_rocksdb_batch(|mut batch| {
+                for ((address, key), blocks) in storage_transitions {
+                    batch.append_storage_history_shard(address, key, blocks)?;
+                }
+                Ok(((), Some(batch.into_inner())))
+            })?;
+            self.commit_pending_rocksdb_batches()?;
+            Ok(())
+        } else {
+            self.append_history_index::<_, tables::StoragesHistory>(
+                storage_transitions,
+                |(address, storage_key), highest_block_number| {
+                    StorageShardedKey::new(address, storage_key, highest_block_number)
+                },
+            )
+        }
     }
 
     #[instrument(level = "debug", target = "providers::db", skip_all)]
     fn update_history_indices(&self, range: RangeInclusive<BlockNumber>) -> ProviderResult<()> {
-        let storage_settings = self.cached_storage_settings();
-        if !storage_settings.storage_v2 {
-            let indices = self.changed_accounts_and_blocks_with_range(range.clone())?;
-            self.insert_account_history_index(indices)?;
-        }
+        let account_indices = self.changed_accounts_and_blocks_with_range(range.clone())?;
+        self.insert_account_history_index(account_indices)?;
 
-        if !storage_settings.storage_v2 {
-            let indices = self.changed_storages_and_blocks_with_range(range)?;
-            self.insert_storage_history_index(indices)?;
-        }
+        let storage_indices = self.changed_storages_and_blocks_with_range(range)?;
+        self.insert_storage_history_index(storage_indices)?;
 
         Ok(())
     }
@@ -3668,29 +3685,8 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> BlockWriter
 
         // Use pre-computed transitions for history indices since static file
         // writes aren't visible until commit.
-        // Note: For MDBX we use insert_*_history_index. For RocksDB we use
-        // append_*_history_shard which handles read-merge-write internally.
-        let storage_settings = self.cached_storage_settings();
-        if storage_settings.storage_v2 {
-            self.with_rocksdb_batch(|mut batch| {
-                for (address, blocks) in account_transitions {
-                    batch.append_account_history_shard(address, blocks)?;
-                }
-                Ok(((), Some(batch.into_inner())))
-            })?;
-        } else {
-            self.insert_account_history_index(account_transitions)?;
-        }
-        if storage_settings.storage_v2 {
-            self.with_rocksdb_batch(|mut batch| {
-                for ((address, key), blocks) in storage_transitions {
-                    batch.append_storage_history_shard(address, key, blocks)?;
-                }
-                Ok(((), Some(batch.into_inner())))
-            })?;
-        } else {
-            self.insert_storage_history_index(storage_transitions)?;
-        }
+        self.insert_account_history_index(account_transitions)?;
+        self.insert_storage_history_index(storage_transitions)?;
         durations_recorder.record_relative(metrics::Action::InsertHistoryIndices);
 
         // Update pipeline progress
