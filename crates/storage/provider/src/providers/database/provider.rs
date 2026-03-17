@@ -882,10 +882,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
                 .unwrap_or_default();
 
             if execution_tip > best_block {
-                return Err(ProviderError::BlockNotExecuted {
-                    requested: block_number,
-                    executed: best_block,
-                });
+                return Err(ProviderError::StateUnavailableDuringSync(block_number));
             }
 
             return Ok(Box::new(LatestStateProvider::new(self)));
