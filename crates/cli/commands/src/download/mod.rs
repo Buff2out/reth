@@ -37,7 +37,7 @@ use std::{
 };
 use tar::Archive;
 use tokio::task;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tui::{run_selector, SelectorOutput};
 use url::Url;
 use zstd::stream::read::Decoder as ZstdDecoder;
@@ -1569,16 +1569,33 @@ fn verify_output_files(target_dir: &Path, output_files: &[OutputFileChecksum]) -
         let output_path = target_dir.join(&expected.path);
         let meta = match fs::metadata(&output_path) {
             Ok(meta) => meta,
-            Err(_) => return Ok(false),
+            Err(_) => {
+                debug!(target: "reth::cli", path = %output_path.display(), "Output file not found, needs download");
+                return Ok(false);
+            }
         };
         if meta.len() != expected.size {
+            debug!(target: "reth::cli",
+                path = %output_path.display(),
+                expected_size = expected.size,
+                actual_size = meta.len(),
+                "Output file size mismatch, needs re-download"
+            );
             return Ok(false);
         }
 
+        debug!(target: "reth::cli", path = %output_path.display(), size = expected.size, "Verifying BLAKE3 checksum");
         let actual = file_blake3_hex(&output_path)?;
         if !actual.eq_ignore_ascii_case(&expected.blake3) {
+            warn!(target: "reth::cli",
+                path = %output_path.display(),
+                expected = %expected.blake3,
+                actual = %actual,
+                "BLAKE3 checksum mismatch, needs re-download"
+            );
             return Ok(false);
         }
+        debug!(target: "reth::cli", path = %output_path.display(), "BLAKE3 checksum verified OK");
     }
 
     Ok(true)
