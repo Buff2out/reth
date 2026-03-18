@@ -1711,7 +1711,18 @@ impl ArenaParallelSparseTrie {
             .filter(|(_, _, u)| matches!(u, LeafUpdate::Changed(v) if v.is_empty()))
             .count() as u64;
 
-        if num_removals == 0 || num_removals as usize != subtrie_updates.len() {
+        // Touched is a no-op that doesn't alter trie structure, so it must be
+        // excluded when deciding whether "all updates are removals". This mirrors
+        // the `all_removals` / `might_empty_subtrie` filter in `update_leaves`.
+        // Without this, a batch of removals + Touched entries
+        // would fail the `num_removals != num_changed` check, skip the proof
+        // request for the blinded sibling, and later panic in
+        // `maybe_collapse_or_remove_branch` when the subtrie empties inline.
+        let num_changed =
+            subtrie_updates.iter().filter(|(_, _, u)| matches!(u, LeafUpdate::Changed(_))).count()
+                as u64;
+
+        if num_removals == 0 || num_removals != num_changed {
             return None;
         }
 
@@ -2817,7 +2828,24 @@ impl SparseTrie for ArenaParallelSparseTrie {
 
                     let num_subtrie_updates = update_idx - subtrie_start;
 
-                    if num_subtrie_updates >= threshold {
+                    // If all updates are removals and could empty the subtrie,
+                    // force inline processing so the upper-arena collapse logic
+                    // can detect blinded siblings and request proofs.
+                    let all_removals = subtrie_updates
+                        .iter()
+                        // Filter out Touched, as they don't affect the structure of the trie. So an
+                        // update set with 2 removals and one Touched could still result in an empty
+                        // sub trie.
+                        .filter(|(_, _, u)| matches!(u, LeafUpdate::Changed(_)))
+                        .all(|(_, _, u)| matches!(u, LeafUpdate::Changed(v) if v.is_empty()));
+                    let subtrie_num_leaves = match &self.upper_arena[child_idx] {
+                        ArenaSparseNode::Subtrie(s) => s.num_leaves,
+                        _ => 0,
+                    };
+                    let might_empty_subtrie =
+                        all_removals && num_subtrie_updates as u64 >= subtrie_num_leaves;
+
+                    if num_subtrie_updates >= threshold && !might_empty_subtrie {
                         // Take subtrie for parallel update.
                         trace!(target: TRACE_TARGET, ?subtrie_root_path, num_subtrie_updates, "Taking subtrie for parallel update");
                         let ArenaSparseNode::Subtrie(subtrie) = mem::replace(
@@ -2978,7 +3006,10 @@ impl SparseTrie for ArenaParallelSparseTrie {
         }
 
         // Navigate to each taken subtrie via seek to propagate dirty state
-        // through intermediate branches, and collapse any EmptyRoot subtries.
+        // through intermediate branches. Taken subtries are guaranteed not to
+        // become EmptyRoot (the would-empty-subtrie check above forces those
+        // inline), so we only need to handle sibling collapses that may have
+        // occurred during inline processing while this subtrie was taken.
         {
             let mut cursor = mem::take(&mut self.buffers.cursor);
             cursor.reset(&self.upper_arena, self.root, Nibbles::default());
@@ -2987,13 +3018,17 @@ impl SparseTrie for ArenaParallelSparseTrie {
                 let find_result = cursor.seek(&mut self.upper_arena, path);
                 match find_result {
                     SeekResult::RevealedSubtrie => {
-                        let head_idx = cursor.head().expect("cursor is non-empty").index;
-                        if let ArenaSparseNode::Subtrie(s) = &self.upper_arena[head_idx] &&
-                            matches!(s.arena[s.root], ArenaSparseNode::EmptyRoot)
-                        {
-                            self.maybe_unwrap_subtrie(&mut cursor);
-                            continue;
-                        }
+                        debug_assert!(
+                            {
+                                let head_idx = cursor.head().expect("cursor is non-empty").index;
+                                !matches!(
+                                    &self.upper_arena[head_idx],
+                                    ArenaSparseNode::Subtrie(s) if matches!(s.arena[s.root], ArenaSparseNode::EmptyRoot)
+                                )
+                            },
+                            "taken subtrie became EmptyRoot — should have been forced inline"
+                        );
+
                         cursor.pop(&mut self.upper_arena);
 
                         // The parent branch (now at cursor top) may have had a sibling
