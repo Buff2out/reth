@@ -241,7 +241,7 @@ if [ "$BIG_BLOCKS" = "true" ]; then
     --payload-dir "$BIG_BLOCKS_DIR/payloads" \
     --engine-rpc-url http://127.0.0.1:8551 \
     --jwt-secret "$DATADIR/jwt.hex" \
-    --count 10 \
+    --count 20 \
     --output "$OUTPUT_DIR" 2>&1 | sed -u "s/^/[bench] /"
 else
   # Standard mode: warmup + new-payload-fcu
