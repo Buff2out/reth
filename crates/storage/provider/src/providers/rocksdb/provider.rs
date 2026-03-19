@@ -1550,27 +1550,7 @@ impl<'db> RocksReadSnapshot<'db> {
     }
 }
 
-/// Outcome of pruning a history shard in `RocksDB`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PruneShardOutcome {
-    /// Shard was deleted entirely.
-    Deleted,
-    /// Shard was updated with filtered block numbers.
-    Updated,
-    /// Shard was unchanged (no blocks <= `to_block`).
-    Unchanged,
-}
-
-/// Tracks pruning outcomes for batch operations.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct PrunedIndices {
-    /// Number of shards completely deleted.
-    pub deleted: usize,
-    /// Number of shards that were updated (filtered but still have entries).
-    pub updated: usize,
-    /// Number of shards that were unchanged.
-    pub unchanged: usize,
-}
+pub use reth_db_api::history::{PruneShardOutcome, PrunedShardStats as PrunedIndices};
 
 /// Handle for building a batch of operations atomically.
 ///
@@ -1930,51 +1910,18 @@ impl<'a> RocksDBBatch<'a> {
     where
         K: Clone,
     {
-        if shards.is_empty() {
-            return Ok(PruneShardOutcome::Unchanged);
-        }
+        use reth_db_api::history::{plan_shard_prune, ShardOp};
 
-        let mut deleted = false;
-        let mut updated = false;
-        let mut last_remaining: Option<(K, BlockNumberList)> = None;
+        let plan = plan_shard_prune(shards, to_block, get_highest, is_sentinel, create_sentinel);
 
-        for (key, block_list) in shards {
-            if !is_sentinel(&key) && get_highest(&key) <= to_block {
-                delete_shard(self, key)?;
-                deleted = true;
-            } else {
-                let original_len = block_list.len();
-                let filtered =
-                    BlockNumberList::new_pre_sorted(block_list.iter().filter(|&b| b > to_block));
-
-                if filtered.is_empty() {
-                    delete_shard(self, key)?;
-                    deleted = true;
-                } else if filtered.len() < original_len {
-                    put_shard(self, key.clone(), &filtered)?;
-                    last_remaining = Some((key, filtered));
-                    updated = true;
-                } else {
-                    last_remaining = Some((key, block_list));
-                }
+        for op in plan.ops {
+            match op {
+                ShardOp::Delete(key) => delete_shard(self, key)?,
+                ShardOp::Put(key, list) => put_shard(self, key, &list)?,
             }
         }
 
-        if let Some((last_key, last_value)) = last_remaining &&
-            !is_sentinel(&last_key)
-        {
-            delete_shard(self, last_key)?;
-            put_shard(self, create_sentinel(), &last_value)?;
-            updated = true;
-        }
-
-        if deleted {
-            Ok(PruneShardOutcome::Deleted)
-        } else if updated {
-            Ok(PruneShardOutcome::Updated)
-        } else {
-            Ok(PruneShardOutcome::Unchanged)
-        }
+        Ok(plan.outcome)
     }
 
     /// Prunes account history for the given address, removing blocks <= `to_block`.

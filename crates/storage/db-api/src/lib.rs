@@ -85,6 +85,9 @@ pub mod transaction;
 /// Re-exports
 pub use reth_storage_errors::db::{DatabaseError, DatabaseWriteOperation};
 
+/// Shared history shard pruning logic.
+pub mod history;
+
 pub mod models;
 mod scale;
 

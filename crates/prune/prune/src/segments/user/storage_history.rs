@@ -163,6 +163,7 @@ impl StorageHistory {
                 StorageShardedKey::new(address, storage_key, block_number)
             },
             |a, b| a.address == b.address && a.sharded_key.key == b.sharded_key.key,
+            |key| StorageShardedKey::new(key.address, key.sharded_key.key, u64::MAX),
         )
         .map_err(Into::into)
     }
@@ -227,6 +228,7 @@ impl StorageHistory {
                 StorageShardedKey::new(address, storage_key, block_number)
             },
             |a, b| a.address == b.address && a.sharded_key.key == b.sharded_key.key,
+            |key| StorageShardedKey::new(key.address, key.sharded_key.key, u64::MAX),
         )
         .map_err(Into::into)
     }
