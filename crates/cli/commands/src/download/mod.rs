@@ -279,6 +279,29 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         let cancel_token = CancellationToken::new();
         let _cancel_guard = cancel_token.drop_guard();
 
+        // Wire Ctrl+C / SIGTERM to the cancellation token so blocking
+        // download threads actually stop.
+        let signal_token = cancel_token.clone();
+        tokio::spawn(async move {
+            #[cfg(unix)]
+            {
+                let ctrl_c = tokio::signal::ctrl_c();
+                let mut sigterm =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("failed to register SIGTERM handler");
+                tokio::select! {
+                    _ = ctrl_c => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+            info!(target: "reth::cli", "Cancelling download...");
+            signal_token.cancel();
+        });
+
         // --list: print available snapshots and exit
         if self.list {
             let entries = fetch_snapshot_api_entries(chain_id).await?;
@@ -809,7 +832,7 @@ impl DownloadProgress {
     }
 
     /// Updates progress bar (for single-archive legacy downloads)
-    fn update(&mut self, chunk_size: u64) -> Result<()> {
+    fn update(&mut self, chunk_size: u64, label: &str) -> Result<()> {
         self.downloaded += chunk_size;
 
         if self.last_displayed.elapsed() >= Duration::from_millis(100) {
@@ -832,7 +855,7 @@ impl DownloadProgress {
             let eta_str = Self::format_duration(eta);
 
             print!(
-                "\rDownloading and extracting... {progress:.2}% ({formatted_downloaded} / {formatted_total}) ETA: {eta_str}     ",
+                "\r{label}... {progress:.2}% ({formatted_downloaded} / {formatted_total}) ETA: {eta_str}     ",
             );
             io::stdout().flush()?;
             self.last_displayed = Instant::now();
@@ -956,16 +979,22 @@ fn spawn_progress_display(progress: Arc<SharedProgress>) -> tokio::task::JoinHan
     })
 }
 
-/// Adapter to track progress while reading (used for extraction in legacy path)
+/// Adapter to track progress while reading (used for extraction and streaming)
 struct ProgressReader<R> {
     reader: R,
     progress: DownloadProgress,
     cancel_token: CancellationToken,
+    label: &'static str,
 }
 
 impl<R: Read> ProgressReader<R> {
-    fn new(reader: R, total_size: u64, cancel_token: CancellationToken) -> Self {
-        Self { reader, progress: DownloadProgress::new(total_size), cancel_token }
+    fn new(
+        reader: R,
+        total_size: u64,
+        cancel_token: CancellationToken,
+        label: &'static str,
+    ) -> Self {
+        Self { reader, progress: DownloadProgress::new(total_size), cancel_token, label }
     }
 }
 
@@ -976,7 +1005,7 @@ impl<R: Read> Read for ProgressReader<R> {
         }
         let bytes = self.reader.read(buf)?;
         if bytes > 0 &&
-            let Err(e) = self.progress.update(bytes as u64)
+            let Err(e) = self.progress.update(bytes as u64, self.label)
         {
             return Err(io::Error::other(e));
         }
@@ -1017,8 +1046,9 @@ fn extract_archive<R: Read>(
     format: CompressionFormat,
     target_dir: &Path,
     cancel_token: CancellationToken,
+    label: &'static str,
 ) -> Result<()> {
-    let progress_reader = ProgressReader::new(reader, total_size, cancel_token);
+    let progress_reader = ProgressReader::new(reader, total_size, cancel_token, label);
 
     match format {
         CompressionFormat::Lz4 => {
@@ -1062,7 +1092,7 @@ fn extract_from_file(path: &Path, format: CompressionFormat, target_dir: &Path) 
         "Extracting local archive"
     );
     let start = Instant::now();
-    extract_archive(file, total_size, format, target_dir, CancellationToken::new())?;
+    extract_archive(file, total_size, format, target_dir, CancellationToken::new(), "Extracting")?;
     info!(target: "reth::cli",
         file = %path.display(),
         elapsed = %DownloadProgress::format_duration(start.elapsed()),
@@ -1088,7 +1118,7 @@ impl<W: Write> Write for ProgressWriter<W> {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "download cancelled"));
         }
         let n = self.inner.write(buf)?;
-        let _ = self.progress.update(n as u64);
+        let _ = self.progress.update(n as u64, "Downloading");
         Ok(n)
     }
 
@@ -1176,6 +1206,10 @@ fn resumable_download(
     };
 
     for attempt in 1..=MAX_DOWNLOAD_RETRIES {
+        if cancel_token.is_cancelled() {
+            return Err(eyre::eyre!("Download cancelled"));
+        }
+
         let existing_size = fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0);
 
         if let Some(total) = total_size &&
@@ -1314,6 +1348,10 @@ fn streaming_download_and_extract(
     let mut last_error: Option<eyre::Error> = None;
 
     for attempt in 1..=MAX_DOWNLOAD_RETRIES {
+        if cancel_token.is_cancelled() {
+            return Err(eyre::eyre!("Download cancelled"));
+        }
+
         if attempt > 1 {
             info!(target: "reth::cli",
                 url = %url,
@@ -1349,7 +1387,7 @@ fn streaming_download_and_extract(
             extract_archive_raw(reader, format, target_dir)
         } else {
             let total_size = response.content_length().unwrap_or(0);
-            extract_archive(response, total_size, format, target_dir, cancel_token.clone())
+            extract_archive(response, total_size, format, target_dir, cancel_token.clone(), "Downloading and extracting")
         };
 
         match result {
@@ -1396,7 +1434,7 @@ fn download_and_extract(
         // Skip progress tracking for extraction in parallel mode
         extract_archive_raw(file, format, target_dir)?;
     } else {
-        extract_archive(file, total_size, format, target_dir, cancel_token)?;
+        extract_archive(file, total_size, format, target_dir, cancel_token, "Extracting")?;
         info!(target: "reth::cli",
             file = %file_name,
             "Extraction complete"
