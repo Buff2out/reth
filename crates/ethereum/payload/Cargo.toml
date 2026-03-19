@@ -27,7 +27,9 @@ reth-evm.workspace = true
 reth-evm-ethereum = { workspace = true, features = ["std"] }
 reth-errors.workspace = true
 reth-chainspec.workspace = true
+reth-engine-tree.workspace = true
 reth-payload-validator.workspace = true
+reth-trie.workspace = true
 
 # ethereum
 alloy-rlp.workspace = true

@@ -55,12 +55,14 @@ use tracing::{debug, debug_span, instrument, warn, Span};
 
 pub mod bal;
 pub mod multiproof;
-mod preserved_sparse_trie;
+pub mod preserved_sparse_trie;
 pub mod prewarm;
 pub mod receipt_root_task;
 pub mod sparse_trie;
 
-use preserved_sparse_trie::{PreservedSparseTrie, SharedPreservedSparseTrie};
+pub use preserved_sparse_trie::{
+    PreservedSparseTrie, PreservedTrieGuard, SharedPreservedSparseTrie, SparseTrie,
+};
 
 /// Default parallelism thresholds to use with the [`ParallelSparseTrie`].
 ///
@@ -1024,7 +1026,7 @@ impl PayloadExecutionCache {
     /// - It exists and matches the requested parent hash
     /// - No other tasks are currently using it (checked via Arc reference count)
     #[instrument(level = "debug", target = "engine::tree::payload_processor", skip(self))]
-    pub(crate) fn get_cache_for(&self, parent_hash: B256) -> Option<SavedCache> {
+    pub fn get_cache_for(&self, parent_hash: B256) -> Option<SavedCache> {
         let start = Instant::now();
         let mut cache = self.inner.write();
 

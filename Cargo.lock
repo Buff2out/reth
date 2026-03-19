@@ -8727,6 +8727,7 @@ dependencies = [
  "reth-basic-payload-builder",
  "reth-chainspec",
  "reth-consensus-common",
+ "reth-engine-tree",
  "reth-errors",
  "reth-ethereum-primitives",
  "reth-evm",
@@ -8739,6 +8740,7 @@ dependencies = [
  "reth-revm",
  "reth-storage-api",
  "reth-transaction-pool",
+ "reth-trie",
  "revm",
  "tracing",
 ]

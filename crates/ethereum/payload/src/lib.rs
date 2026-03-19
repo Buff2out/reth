@@ -40,6 +40,8 @@ use revm::context_interface::Block as _;
 use std::sync::Arc;
 use tracing::{debug, trace, warn};
 
+pub mod builder2;
+
 mod config;
 pub use config::*;
 
