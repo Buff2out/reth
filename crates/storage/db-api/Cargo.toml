@@ -88,8 +88,8 @@ arbitrary = [
     "op-alloy-consensus?/arbitrary",
     "reth-ethereum-primitives/arbitrary",
 ]
-op = [
-    "dep:op-alloy-consensus",
-    "reth-codecs/op",
-    "reth-primitives-traits/op",
-]
+# op = [
+#     "dep:op-alloy-consensus",
+#     "reth-codecs/op",
+#     "reth-primitives-traits/op",
+# ]

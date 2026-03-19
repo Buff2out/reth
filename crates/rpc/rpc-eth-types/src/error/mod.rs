@@ -553,6 +553,7 @@ where
             EVMError::Header(err) => err.into(),
             EVMError::Database(err) => err.into(),
             EVMError::Custom(err) => Self::EvmCustom(err),
+            EVMError::CustomAny(err) => Self::EvmCustom(err.to_string()),
         }
     }
 }

@@ -211,8 +211,11 @@ where
         self.inner.execute_transaction_without_commit(tx)
     }
 
-    fn commit_transaction(&mut self, output: Self::Result) -> Result<u64, BlockExecutionError> {
-        self.inner.commit_transaction(output)
+    fn commit_transaction(
+        &mut self,
+        output: Self::Result,
+    ) {
+        let _ = self.inner.commit_transaction(output);
     }
 
     fn finish(mut self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {

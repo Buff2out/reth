@@ -81,8 +81,8 @@ pub struct CacheEntry<S> {
 }
 
 impl<S> CacheEntry<S> {
-    const fn gas_used(&self) -> u64 {
-        self.output.gas_used
+    fn gas_used(&self) -> u64 {
+        self.output.gas.state_gas_spent()
     }
 
     fn to_precompile_result(&self) -> PrecompileResult {

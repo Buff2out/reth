@@ -53,7 +53,7 @@ std = [
     "either/std",
     "alloy-consensus/std",
 ]
-op = [
-    "dep:op-alloy-rpc-types-engine",
-    "reth-primitives-traits/op",
-]
+# op = [
+#     "dep:op-alloy-rpc-types-engine",
+#     "reth-primitives-traits/op",
+# ]

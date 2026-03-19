@@ -110,7 +110,7 @@ pub fn prague_custom() -> &'static Precompiles {
         let precompile = Precompile::new(
             PrecompileId::custom("custom"),
             address!("0x0000000000000000000000000000000000000999"),
-            |_, _| PrecompileResult::Ok(PrecompileOutput::new(0, Bytes::new())),
+            |_, _| PrecompileResult::Ok(PrecompileOutput::new(0, 0, Bytes::new())),
         );
         precompiles.extend([precompile]);
         precompiles
