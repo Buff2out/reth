@@ -212,10 +212,11 @@ fn strip_blob_transactions(data: &mut ExecutionData) {
         info!(target: "reth-bench", removed, "Stripped blob transactions from payload");
     }
 
-    // Zero out blob gas fields since blob txs were removed
+    // Zero out blob_gas_used since blob txs were removed.
+    // Keep excess_blob_gas unchanged — it's validated against the parent block's
+    // excess_blob_gas and blob_gas_used, so it must remain consistent.
     if let Some(v3) = data.payload.as_v3_mut() {
         v3.blob_gas_used = 0;
-        v3.excess_blob_gas = 0;
     }
 
     // Rebuild sidecar with empty versioned_hashes to pass validation
