@@ -885,8 +885,6 @@ jobs:
           echo "BENCH_METRICS_PROXY_PID=${PROXY_PID}" >> "$GITHUB_ENV"
           echo "Metrics proxy started (PID $PROXY_PID)"
 
-      # Interleaved run order (B-F-F-B) to reduce systematic bias from
-      # thermal drift and cache warming.
       - name: Update status (baseline 1/2)
         if: success() && env.BENCH_COMMENT_ID
         uses: actions/github-script@v8
