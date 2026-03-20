@@ -885,17 +885,17 @@ jobs:
           echo "BENCH_METRICS_PROXY_PID=${PROXY_PID}" >> "$GITHUB_ENV"
           echo "Metrics proxy started (PID $PROXY_PID)"
 
-      - name: Update status (running benchmarks)
+      # Interleaved run order (B-F-F-B) to reduce systematic bias from
+      # thermal drift and cache warming.
+      - name: Update status (baseline 1/2)
         if: success() && env.BENCH_COMMENT_ID
         uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.DEREK_PAT }}
           script: |
             const s = require('./.github/scripts/bench-update-status.js');
-            await s({github, context, status: 'Running benchmarks...'});
+            await s({github, context, status: 'Running baseline benchmark (1/2)...'});
 
-      # Interleaved run order (B-F-F-B) to reduce systematic bias from
-      # thermal drift and cache warming.
       - name: "Run benchmark: baseline (1/2)"
         id: run-baseline-1
         env:
@@ -906,6 +906,15 @@ jobs:
           {"benchmark_run":"baseline-1","run_type":"baseline","git_ref":"${BASELINE_REF}","bench_sha":"${BASELINE_REF}","benchmark_id":"${BENCH_ID}","run_start_epoch":"$(date +%s)","reference_epoch":"${BENCH_REFERENCE_EPOCH}"}
           LABELS
           taskset -c 0 .github/scripts/bench-reth-run.sh baseline ../reth-baseline/target/profiling/reth "$BENCH_WORK_DIR/baseline-1"
+
+      - name: Update status (feature 1/2)
+        if: success() && env.BENCH_COMMENT_ID
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.DEREK_PAT }}
+          script: |
+            const s = require('./.github/scripts/bench-update-status.js');
+            await s({github, context, status: 'Running feature benchmark (1/2)...'});
 
       - name: "Run benchmark: feature (1/2)"
         id: run-feature-1
@@ -918,6 +927,15 @@ jobs:
           LABELS
           taskset -c 0 .github/scripts/bench-reth-run.sh feature ../reth-feature/target/profiling/reth "$BENCH_WORK_DIR/feature-1"
 
+      - name: Update status (feature 2/2)
+        if: success() && env.BENCH_COMMENT_ID && env.BENCH_ABBA != 'false'
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.DEREK_PAT }}
+          script: |
+            const s = require('./.github/scripts/bench-update-status.js');
+            await s({github, context, status: 'Running feature benchmark (2/2)...'});
+
       - name: "Run benchmark: feature (2/2)"
         if: env.BENCH_ABBA != 'false'
         id: run-feature-2
@@ -929,6 +947,15 @@ jobs:
           {"benchmark_run":"feature-2","run_type":"feature","git_ref":"${FEATURE_REF}","bench_sha":"${FEATURE_REF}","benchmark_id":"${BENCH_ID}","run_start_epoch":"$(date +%s)","reference_epoch":"${BENCH_REFERENCE_EPOCH}"}
           LABELS
           taskset -c 0 .github/scripts/bench-reth-run.sh feature ../reth-feature/target/profiling/reth "$BENCH_WORK_DIR/feature-2"
+
+      - name: Update status (baseline 2/2)
+        if: success() && env.BENCH_COMMENT_ID && env.BENCH_ABBA != 'false'
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.DEREK_PAT }}
+          script: |
+            const s = require('./.github/scripts/bench-update-status.js');
+            await s({github, context, status: 'Running baseline benchmark (2/2)...'});
 
       - name: "Run benchmark: baseline (2/2)"
         if: env.BENCH_ABBA != 'false'
