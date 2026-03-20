@@ -5,7 +5,7 @@
 
 use alloy_eips::eip4895::Withdrawal;
 use alloy_evm::{
-    block::{BlockExecutorFactory, BlockExecutorFor, ExecutableTx},
+    block::{BlockExecutorFactory, BlockExecutorFor, ExecutableTx, GasOutput},
     eth::{EthBlockExecutionCtx, EthBlockExecutor, EthTxResult},
     precompiles::PrecompilesMap,
     revm::context::Block as _,
@@ -214,8 +214,8 @@ where
     fn commit_transaction(
         &mut self,
         output: Self::Result,
-    ) {
-        let _ = self.inner.commit_transaction(output);
+    ) -> Result<GasOutput, BlockExecutionError> {
+        self.inner.commit_transaction(output)
     }
 
     fn finish(mut self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
