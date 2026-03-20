@@ -274,10 +274,8 @@ impl<T: NodePrimitives, ChainSpec: EthChainSpec + 'static> RocksDBProviderFactor
         RocksDBProvider::builder(std::path::PathBuf::default()).build().unwrap()
     }
 
-    #[cfg(all(unix, feature = "rocksdb"))]
     fn set_pending_rocksdb_batch(&self, _batch: rocksdb::WriteBatchWithTransaction<true>) {}
 
-    #[cfg(all(unix, feature = "rocksdb"))]
     fn commit_pending_rocksdb_batches(&self) -> ProviderResult<()> {
         Ok(())
     }

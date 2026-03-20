@@ -33,7 +33,7 @@ use reth_trie::{
 use rocksdb::{
     BlockBasedOptions, Cache, ChecksumType, ColumnFamilyDescriptor, CompactionPri,
     DBCompressionType, DBRawIteratorWithThreadMode, IteratorMode, OptimisticTransactionDB,
-    OptimisticTransactionOptions, Options, ReadOptions, SliceTransform, SnapshotWithThreadMode,
+    OptimisticTransactionOptions, Options, ReadOptions, SnapshotWithThreadMode,
     Transaction,
     WriteBatchWithTransaction, WriteOptions, DB,
 };
@@ -1181,7 +1181,7 @@ impl RocksDBProvider {
     /// This bypasses the prefix extractor, ensuring full lexicographic iteration
     /// across all entries in the column family. Needed for CFs with a prefix
     /// extractor when the caller manages prefix filtering manually.
-    pub fn raw_iterator_for_cf_total_order(
+    pub(super) fn raw_iterator_for_cf_total_order(
         &self,
         name: &str,
     ) -> Result<RocksDBRawIterEnum<'_>, DatabaseError> {
@@ -1204,6 +1204,7 @@ impl RocksDBProvider {
     ///
     /// Sets `iterate_lower_bound` and `iterate_upper_bound` so RocksDB can skip
     /// SSTs and blocks outside the prefix range.
+    #[allow(dead_code)]
     pub(super) fn raw_iterator_for_cf_bounded(
         &self,
         name: &str,
@@ -2584,7 +2585,7 @@ impl<'a> RocksDBBatch<'a> {
         nibbles: PackedStoredNibblesSubKey,
         node: &BranchNodeCompact,
     ) -> ProviderResult<()> {
-        let cf = self.provider.0.cf_handle_rw(tables::StoragesTrie::NAME)?;
+        let cf = self.provider.get_cf_handle::<tables::StoragesTrie>()?;
         let mut compound_key = [0u8; 65];
         compound_key[..32].copy_from_slice(hashed_address.as_ref());
         compound_key[32..].copy_from_slice(&nibbles.encode());
@@ -2600,7 +2601,7 @@ impl<'a> RocksDBBatch<'a> {
         hashed_address: B256,
         nibbles: PackedStoredNibblesSubKey,
     ) -> ProviderResult<()> {
-        let cf = self.provider.0.cf_handle_rw(tables::StoragesTrie::NAME)?;
+        let cf = self.provider.get_cf_handle::<tables::StoragesTrie>()?;
         let mut compound_key = [0u8; 65];
         compound_key[..32].copy_from_slice(hashed_address.as_ref());
         compound_key[32..].copy_from_slice(&nibbles.encode());
@@ -2637,7 +2638,7 @@ impl<'a> RocksDBBatch<'a> {
                 }
             }
         }
-        let cf = self.provider.0.cf_handle_rw(tables::StoragesTrie::NAME)?;
+        let cf = self.provider.get_cf_handle::<tables::StoragesTrie>()?;
         for key in keys_to_delete {
             self.inner.delete_cf(&cf, &key);
         }

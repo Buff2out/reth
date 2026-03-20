@@ -10,6 +10,4 @@ pub use provider::{
     PruneShardOutcome, PrunedIndices, RocksDBBatch, RocksDBBuilder, RocksDBIter, RocksDBProvider,
     RocksDBRawIter, RocksDBStats, RocksDBTableStats, RocksReadSnapshot, RocksTx,
 };
-pub use trie_cursor::{
-    RocksDBAccountTrieCursor, RocksDBStorageTrieCursor, RocksDBTrieCursorFactory,
-};
+pub(crate) use trie_cursor::{RocksDBAccountTrieCursor, RocksDBStorageTrieCursor};

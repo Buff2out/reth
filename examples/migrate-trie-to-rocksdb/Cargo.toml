@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 reth-db = { workspace = true, features = ["mdbx"] }
 reth-db-api = { workspace = true }
-reth-provider = { workspace = true, features = ["rocksdb"] }
+reth-provider = { workspace = true }
 reth-trie-common = { workspace = true }
 reth-trie-db = { workspace = true }
 eyre.workspace = true

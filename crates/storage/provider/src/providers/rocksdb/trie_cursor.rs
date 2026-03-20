@@ -22,13 +22,15 @@ use reth_trie::{
 /// nibble encoding (storage v2). Account trie entries are stored as simple key-value
 /// pairs, while storage trie entries use compound keys to flatten MDBX's DupSort layout.
 #[derive(Debug)]
-pub struct RocksDBTrieCursorFactory<'db> {
+#[allow(dead_code)]
+pub(crate) struct RocksDBTrieCursorFactory<'db> {
     provider: &'db RocksDBProvider,
 }
 
 impl<'db> RocksDBTrieCursorFactory<'db> {
     /// Creates a new [`RocksDBTrieCursorFactory`].
-    pub const fn new(provider: &'db RocksDBProvider) -> Self {
+    #[allow(dead_code)]
+    pub(crate) const fn new(provider: &'db RocksDBProvider) -> Self {
         Self { provider }
     }
 }
@@ -72,13 +74,13 @@ impl<'db> TrieCursorFactory for RocksDBTrieCursorFactory<'db> {
 ///
 /// Iterates over `AccountsTrie` column family entries with `PackedStoredNibbles` keys
 /// and `BranchNodeCompact` values.
-pub struct RocksDBAccountTrieCursor<'db> {
+pub(crate) struct RocksDBAccountTrieCursor<'db> {
     iter: RocksDBRawIterEnum<'db>,
 }
 
 impl<'db> RocksDBAccountTrieCursor<'db> {
     /// Creates a new account trie cursor from a `RocksDBProvider`.
-    pub fn new(provider: &'db RocksDBProvider) -> Result<Self, DatabaseError> {
+    pub(crate) fn new(provider: &'db RocksDBProvider) -> Result<Self, DatabaseError> {
         let iter = provider.raw_iterator_for_cf(tables::AccountsTrie::NAME)?;
         Ok(Self { iter })
     }
@@ -153,7 +155,7 @@ impl TrieCursor for RocksDBAccountTrieCursor<'_> {
 /// (`B256 || PackedStoredNibblesSubKey`). Only returns entries matching the
 /// current `hashed_address` prefix. Uses bounded iterators to constrain
 /// RocksDB to the address prefix range, skipping irrelevant SSTs.
-pub struct RocksDBStorageTrieCursor<'db> {
+pub(crate) struct RocksDBStorageTrieCursor<'db> {
     iter: RocksDBRawIterEnum<'db>,
     hashed_address: B256,
 }
@@ -171,7 +173,7 @@ impl<'db> RocksDBStorageTrieCursor<'db> {
     /// Uses an unbounded iterator with `total_order_seek` to avoid issues with
     /// the prefix extractor configured on the StoragesTrie CF. The address prefix
     /// is checked manually via `is_current_address()`.
-    pub fn new(
+    pub(crate) fn new(
         provider: &'db RocksDBProvider,
         hashed_address: B256,
     ) -> Result<Self, DatabaseError> {
@@ -314,6 +316,7 @@ fn decode_account_entry(
 /// For a prefix like `[0x12, 0x34, 0xff]`, increments from the rightmost non-0xff byte
 /// to produce `[0x12, 0x35]`. If all bytes are 0xff (e.g., the maximum address),
 /// returns a single `[0xff, ..., 0xff, 0xff]` with one extra byte as a safe upper bound.
+#[allow(dead_code)]
 fn next_prefix(prefix: &[u8]) -> Vec<u8> {
     // Find the rightmost byte that can be incremented
     for i in (0..prefix.len()).rev() {

@@ -3090,7 +3090,6 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriter for DatabaseProvider
         // Keep RocksDB trie data in sync with MDBX.
         // Commit eagerly so subsequent trie cursor reads within the same provider
         // session see the updates (read-your-writes), matching MDBX semantics.
-        #[cfg(all(unix, feature = "rocksdb"))]
         if self.cached_storage_settings().is_v2() {
             let rocksdb = self.rocksdb_provider();
             let mut batch = rocksdb.batch();

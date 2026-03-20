@@ -23,10 +23,9 @@ use reth_trie_db::{
     DatabaseStorageTrieCursor, LegacyKeyAdapter, PackedAccountsTrie, PackedKeyAdapter,
     PackedStoragesTrie,
 };
-use crate::{providers::rocksdb::RocksDBProvider, RocksDBProviderFactory};
-#[cfg(all(unix, feature = "rocksdb"))]
-use crate::providers::rocksdb::{
-    RocksDBAccountTrieCursor, RocksDBStorageTrieCursor,
+use crate::{
+    providers::rocksdb::{RocksDBAccountTrieCursor, RocksDBProvider, RocksDBStorageTrieCursor},
+    RocksDBProviderFactory,
 };
 use std::{
     sync::Arc,
@@ -544,17 +543,9 @@ where
     fn account_trie_cursor(&self) -> Result<Self::AccountTrieCursor<'_>, DatabaseError> {
         let trie_updates = self.trie_updates.as_ref();
         let cursor: Box<dyn TrieCursor + Send> = if self.is_v2 {
-            #[cfg(all(unix, feature = "rocksdb"))]
             if let Some(rocksdb) = &self.rocksdb_provider {
                 Box::new(RocksDBAccountTrieCursor::new(rocksdb)?)
             } else {
-                let tx = self.provider.tx_ref();
-                Box::new(DatabaseAccountTrieCursor::<_, PackedKeyAdapter>::new(
-                    tx.cursor_read::<PackedAccountsTrie>()?,
-                ))
-            }
-            #[cfg(not(all(unix, feature = "rocksdb")))]
-            {
                 let tx = self.provider.tx_ref();
                 Box::new(DatabaseAccountTrieCursor::<_, PackedKeyAdapter>::new(
                     tx.cursor_read::<PackedAccountsTrie>()?,
@@ -575,18 +566,9 @@ where
     ) -> Result<Self::StorageTrieCursor<'_>, DatabaseError> {
         let trie_updates = self.trie_updates.as_ref();
         let cursor: Box<dyn TrieStorageCursor + Send> = if self.is_v2 {
-            #[cfg(all(unix, feature = "rocksdb"))]
             if let Some(rocksdb) = &self.rocksdb_provider {
                 Box::new(RocksDBStorageTrieCursor::new(rocksdb, hashed_address)?)
             } else {
-                let tx = self.provider.tx_ref();
-                Box::new(DatabaseStorageTrieCursor::<_, PackedKeyAdapter>::new(
-                    tx.cursor_dup_read::<PackedStoragesTrie>()?,
-                    hashed_address,
-                ))
-            }
-            #[cfg(not(all(unix, feature = "rocksdb")))]
-            {
                 let tx = self.provider.tx_ref();
                 Box::new(DatabaseStorageTrieCursor::<_, PackedKeyAdapter>::new(
                     tx.cursor_dup_read::<PackedStoragesTrie>()?,
