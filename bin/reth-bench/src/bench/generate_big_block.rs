@@ -212,6 +212,12 @@ fn strip_blob_transactions(data: &mut ExecutionData) {
         info!(target: "reth-bench", removed, "Stripped blob transactions from payload");
     }
 
+    // Zero out blob gas fields since blob txs were removed
+    if let Some(v3) = data.payload.as_v3_mut() {
+        v3.blob_gas_used = 0;
+        v3.excess_blob_gas = 0;
+    }
+
     // Rebuild sidecar with empty versioned_hashes to pass validation
     let cancun = data.sidecar.cancun().map(|c| CancunPayloadFields {
         versioned_hashes: Vec::new(),
