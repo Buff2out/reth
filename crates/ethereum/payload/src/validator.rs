@@ -78,8 +78,10 @@ where
     // First parse the block
     let sealed_block = payload.try_into_block_with_sidecar(&sidecar)?.seal_slow();
 
-    // Ensure the hash included in the payload matches the block hash
-    if expected_hash != sealed_block.hash() {
+    // Ensure the hash included in the payload matches the block hash.
+    // A zeroed hash is treated as a sentinel meaning "skip validation" — used by artificial
+    // merged blocks (e.g. big blocks with env_switches) that intentionally have modified headers.
+    if !expected_hash.is_zero() && expected_hash != sealed_block.hash() {
         return Err(PayloadError::BlockHash {
             execution: sealed_block.hash(),
             consensus: expected_hash,
