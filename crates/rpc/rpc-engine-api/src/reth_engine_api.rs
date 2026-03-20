@@ -33,9 +33,11 @@ impl<Payload: PayloadTypes> RethEngineApiServer<Payload::ExecutionData> for Reth
         input: RethNewPayloadInput<Payload::ExecutionData>,
         wait_for_persistence: Option<bool>,
         wait_for_caches: Option<bool>,
+        env_switches: Option<Vec<(usize, Payload::ExecutionData)>>,
     ) -> RpcResult<RethPayloadStatus> {
         let wait_for_persistence = wait_for_persistence.unwrap_or(true);
         let wait_for_caches = wait_for_caches.unwrap_or(true);
+        let env_switches = env_switches.unwrap_or_default();
         trace!(target: "rpc::engine", wait_for_persistence, wait_for_caches, "Serving reth_newPayload");
 
         let payload = match input {
@@ -49,7 +51,7 @@ impl<Payload: PayloadTypes> RethEngineApiServer<Payload::ExecutionData> for Reth
 
         let (status, timings) = self
             .beacon_engine_handle
-            .reth_new_payload(payload, wait_for_persistence, wait_for_caches)
+            .reth_new_payload(payload, env_switches, wait_for_persistence, wait_for_caches)
             .await
             .map_err(EngineApiError::from)?;
         Ok(RethPayloadStatus {

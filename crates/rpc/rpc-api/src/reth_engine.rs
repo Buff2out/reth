@@ -66,6 +66,7 @@ pub trait RethEngineApi<ExecutionData> {
         payload: RethNewPayloadInput<ExecutionData>,
         wait_for_persistence: Option<bool>,
         wait_for_caches: Option<bool>,
+        env_switches: Option<Vec<(usize, ExecutionData)>>,
     ) -> RpcResult<RethPayloadStatus>;
 
     /// Reth-specific forkchoiceUpdated that sends a regular forkchoice update with no payload

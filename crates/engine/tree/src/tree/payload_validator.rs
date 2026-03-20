@@ -347,6 +347,7 @@ where
     pub fn validate_block_with_state<T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>>(
         &mut self,
         input: BlockOrPayload<T>,
+        env_switches: Vec<(usize, T::ExecutionData)>,
         mut ctx: TreeCtx<'_, N>,
     ) -> InsertPayloadResult<N>
     where
@@ -449,6 +450,16 @@ where
             .in_scope(|| self.evm_env_for(&input))
             .map_err(NewPayloadError::other)?;
 
+        let switch_envs: Vec<(usize, EvmEnvFor<Evm>)> = ensure_ok!(env_switches
+            .iter()
+            .map(|(tx_idx, data)| {
+                self.evm_config
+                    .evm_env_for_payload(data)
+                    .map(|env| (*tx_idx, env))
+                    .map_err(|e| Box::new(e) as Box<dyn core::error::Error + Send + Sync>)
+            })
+            .collect::<Result<_, _>>());
+
         let env = ExecutionEnv {
             evm_env,
             hash: input.hash(),
@@ -528,7 +539,7 @@ where
         // as transactions complete, allowing parallel computation during execution.
         let execute_block_start = Instant::now();
         let (output, senders, receipt_root_rx) =
-            match self.execute_block(state_provider, env, &input, &mut handle) {
+            match self.execute_block(state_provider, env, &input, &mut handle, switch_envs) {
                 Ok(output) => output,
                 Err(err) => return self.handle_execution_error(input, err, &parent_block),
             };
@@ -852,6 +863,7 @@ where
         env: ExecutionEnv<Evm>,
         input: &BlockOrPayload<T>,
         handle: &mut PayloadHandle<impl ExecutableTxFor<Evm>, Err, N::Receipt>,
+        switch_envs: Vec<(usize, EvmEnvFor<Evm>)>,
     ) -> Result<
         (
             BlockExecutionOutput<N::Receipt>,
@@ -918,28 +930,126 @@ where
 
         let transaction_count = input.transaction_count();
         let executed_tx_index = Arc::clone(handle.executed_tx_index());
-        let executor = executor.with_state_hook(
+        let mut executor = executor.with_state_hook(
             handle.state_hook().map(|hook| Box::new(hook) as Box<dyn OnStateHook>),
         );
 
         let execution_start = Instant::now();
 
-        // Execute all transactions and finalize
-        let (executor, senders) = self.execute_transactions(
-            executor,
+        // Apply pre-execution changes for the initial segment (e.g., beacon root update)
+        let pre_exec_start = Instant::now();
+        debug_span!(target: "engine::tree", "pre_execution")
+            .in_scope(|| executor.apply_pre_execution_changes())?;
+        self.metrics.record_pre_execution(pre_exec_start.elapsed());
+
+        let mut senders = Vec::with_capacity(transaction_count);
+        let mut last_sent_len = 0usize;
+        let mut transactions = handle.iter_transactions();
+
+        // Accumulated result across all segments
+        let mut accumulated_receipts: Vec<N::Receipt> = Vec::new();
+        let mut accumulated_gas_used: u64 = 0;
+        let mut accumulated_blob_gas_used: u64 = 0;
+        let mut accumulated_requests = alloy_eips::eip7685::Requests::default();
+
+        // Sort switch_envs by tx index for sequential processing
+        let mut switch_envs = switch_envs;
+        switch_envs.sort_by_key(|(idx, _)| *idx);
+
+        // Process each segment: execute txs up to the next switch boundary, then finish
+        // the current executor (applying post-execution changes), swap the env, and continue.
+        for (switch_idx, switch_env) in switch_envs.into_iter() {
+            // Execute transactions up to this switch boundary
+            self.execute_transactions(
+                &mut executor,
+                transaction_count,
+                &mut transactions,
+                &receipt_tx,
+                &executed_tx_index,
+                &mut senders,
+                &mut last_sent_len,
+                Some(switch_idx),
+            )?;
+
+            // Finish the current executor (applies post-execution changes: withdrawals,
+            // rewards, system calls) and reclaim the EVM + DB.
+            let (evm, segment_result) = executor.finish()?;
+            accumulated_receipts.extend(segment_result.receipts);
+            accumulated_gas_used += segment_result.gas_used;
+            accumulated_blob_gas_used += segment_result.blob_gas_used;
+            accumulated_requests.extend(segment_result.requests);
+
+            // Reclaim the DB from the EVM, create a new EVM with the switched env
+            let reclaimed_db = evm.into_db();
+            debug!(
+                target: "engine::tree::payload_validator",
+                switch_idx,
+                "Switching EVM environment at tx boundary"
+            );
+            let new_evm = self.evm_config.evm_with_env(reclaimed_db, switch_env);
+            let ctx = self
+                .execution_ctx_for(input)
+                .map_err(|e| InsertBlockErrorKind::Other(Box::new(e)))?;
+            executor = self.evm_config.create_executor(new_evm, ctx);
+
+            // Re-attach precompile cache to the new executor
+            if !self.config.precompile_cache_disabled() {
+                executor.evm_mut().precompiles_mut().map_cacheable_precompiles(
+                    |address, precompile| {
+                        let metrics = self
+                            .precompile_cache_metrics
+                            .entry(*address)
+                            .or_insert_with(|| CachedPrecompileMetrics::new_with_address(*address))
+                            .clone();
+                        CachedPrecompile::wrap(
+                            precompile,
+                            self.precompile_cache_map.cache_for_address(*address),
+                            spec_id,
+                            Some(metrics),
+                        )
+                    },
+                );
+            }
+
+            // Apply pre-execution changes for the new segment
+            executor.apply_pre_execution_changes()?;
+        }
+
+        // Execute remaining transactions after the last switch (or all txs if no switches)
+        self.execute_transactions(
+            &mut executor,
             transaction_count,
-            handle.iter_transactions(),
+            &mut transactions,
             &receipt_tx,
             &executed_tx_index,
+            &mut senders,
+            &mut last_sent_len,
+            None,
         )?;
         drop(receipt_tx);
 
-        // Finish execution and get the result
+        // Finish the final segment
         let post_exec_start = Instant::now();
-        let (_evm, result) = debug_span!(target: "engine::tree", "BlockExecutor::finish")
-            .in_scope(|| executor.finish())
-            .map(|(evm, result)| (evm.into_db(), result))?;
+        let (evm, final_result) = debug_span!(target: "engine::tree", "BlockExecutor::finish")
+            .in_scope(|| executor.finish())?;
+
+        // Aggregate the final segment's results
+        accumulated_receipts.extend(final_result.receipts);
+        accumulated_gas_used += final_result.gas_used;
+        accumulated_blob_gas_used += final_result.blob_gas_used;
+        accumulated_requests.extend(final_result.requests);
+
+        // Reclaim the DB
+        let _ = evm.into_db();
         self.metrics.record_post_execution(post_exec_start.elapsed());
+
+        // Build the combined result
+        let result = alloy_evm::block::BlockExecutionResult {
+            receipts: accumulated_receipts,
+            requests: accumulated_requests,
+            gas_used: accumulated_gas_used,
+            blob_gas_used: accumulated_blob_gas_used,
+        };
 
         // Merge transitions into bundle state
         debug_span!(target: "engine::tree", "merge_transitions")
@@ -966,35 +1076,30 @@ where
     /// Returns the executor (for finalization) and the collected senders.
     fn execute_transactions<E, Tx, InnerTx, Err>(
         &self,
-        mut executor: E,
-        transaction_count: usize,
-        transactions: impl Iterator<Item = Result<Tx, Err>>,
+        executor: &mut E,
+        _transaction_count: usize,
+        transactions: &mut impl Iterator<Item = Result<Tx, Err>>,
         receipt_tx: &crossbeam_channel::Sender<IndexedReceipt<N::Receipt>>,
         executed_tx_index: &AtomicUsize,
-    ) -> Result<(E, Vec<Address>), BlockExecutionError>
+        senders: &mut Vec<Address>,
+        last_sent_len: &mut usize,
+        stop_before: Option<usize>,
+    ) -> Result<(), BlockExecutionError>
     where
         E: BlockExecutor<Receipt = N::Receipt>,
         Tx: alloy_evm::block::ExecutableTx<E> + alloy_evm::RecoveredTx<InnerTx>,
         InnerTx: TxHashRef,
         Err: core::error::Error + Send + Sync + 'static,
     {
-        let mut senders = Vec::with_capacity(transaction_count);
-
-        // Apply pre-execution changes (e.g., beacon root update)
-        let pre_exec_start = Instant::now();
-        debug_span!(target: "engine::tree", "pre_execution")
-            .in_scope(|| executor.apply_pre_execution_changes())?;
-        self.metrics.record_pre_execution(pre_exec_start.elapsed());
-
-        // Execute transactions
         let exec_span = debug_span!(target: "engine::tree", "execution").entered();
-        let mut transactions = transactions.into_iter();
-        // Some executors may execute transactions that do not append receipts during the
-        // main loop (e.g., system transactions whose receipts are added during finalization).
-        // In that case, invoking the callback on every transaction would resend the previous
-        // receipt with the same index and can panic the ordered root builder.
-        let mut last_sent_len = 0usize;
         loop {
+            // If we've reached the switch boundary, stop executing
+            if let Some(boundary) = stop_before {
+                if senders.len() >= boundary {
+                    break;
+                }
+            }
+
             // Measure time spent waiting for next transaction from iterator
             // (e.g., parallel signature recovery)
             let wait_start = Instant::now();
@@ -1022,8 +1127,8 @@ where
             executed_tx_index.store(senders.len(), Ordering::Relaxed);
 
             let current_len = executor.receipts().len();
-            if current_len > last_sent_len {
-                last_sent_len = current_len;
+            if current_len > *last_sent_len {
+                *last_sent_len = current_len;
                 // Send the latest receipt to the background task for incremental root computation.
                 if let Some(receipt) = executor.receipts().last() {
                     let tx_index = current_len - 1;
@@ -1033,7 +1138,7 @@ where
         }
         drop(exec_span);
 
-        Ok((executor, senders))
+        Ok(())
     }
 
     /// Compute state root for the given hashed post state in parallel.
@@ -1888,6 +1993,7 @@ pub trait EngineValidator<
     fn validate_payload(
         &mut self,
         payload: Types::ExecutionData,
+        env_switches: Vec<(usize, Types::ExecutionData)>,
         ctx: TreeCtx<'_, N>,
     ) -> ValidationOutcome<N>;
 
@@ -1947,9 +2053,10 @@ where
     fn validate_payload(
         &mut self,
         payload: Types::ExecutionData,
+        env_switches: Vec<(usize, Types::ExecutionData)>,
         ctx: TreeCtx<'_, N>,
     ) -> ValidationOutcome<N> {
-        self.validate_block_with_state(BlockOrPayload::Payload(payload), ctx)
+        self.validate_block_with_state(BlockOrPayload::Payload(payload), env_switches, ctx)
     }
 
     fn validate_block(
@@ -1957,7 +2064,7 @@ where
         block: SealedBlock<N::Block>,
         ctx: TreeCtx<'_, N>,
     ) -> ValidationOutcome<N> {
-        self.validate_block_with_state(BlockOrPayload::Block(block), ctx)
+        self.validate_block_with_state(BlockOrPayload::Block(block), Vec::new(), ctx)
     }
 
     fn on_inserted_executed_block(&self, block: ExecutedBlock<N>) {

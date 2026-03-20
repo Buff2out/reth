@@ -631,10 +631,10 @@ fn test_disconnected_payload() {
 
     let outcome = test_harness
         .tree
-        .on_new_payload(ExecutionData {
-            payload: payload.into(),
-            sidecar: ExecutionPayloadSidecar::none(),
-        })
+        .on_new_payload(
+            ExecutionData { payload: payload.into(), sidecar: ExecutionPayloadSidecar::none() },
+            Vec::new(),
+        )
         .unwrap();
     assert!(outcome.outcome.is_syncing());
 
@@ -1148,10 +1148,10 @@ fn test_on_new_payload_canonical_insertion() {
     // Case 1: Submit payload when NOT sync target head - should be syncing (disconnected)
     let outcome1 = test_harness
         .tree
-        .on_new_payload(ExecutionData {
-            payload: payload1.into(),
-            sidecar: ExecutionPayloadSidecar::none(),
-        })
+        .on_new_payload(
+            ExecutionData { payload: payload1.into(), sidecar: ExecutionPayloadSidecar::none() },
+            Vec::new(),
+        )
         .unwrap();
 
     // Since this is disconnected from genesis, it should be syncing
@@ -1203,10 +1203,10 @@ fn test_on_new_payload_invalid_ancestor() {
     // Submit payload 2 (child of invalid block 1)
     let outcome = test_harness
         .tree
-        .on_new_payload(ExecutionData {
-            payload: payload2.into(),
-            sidecar: ExecutionPayloadSidecar::none(),
-        })
+        .on_new_payload(
+            ExecutionData { payload: payload2.into(), sidecar: ExecutionPayloadSidecar::none() },
+            Vec::new(),
+        )
         .unwrap();
 
     // Verify response is INVALID
@@ -1250,10 +1250,10 @@ fn test_on_new_payload_backfill_buffering() {
     // Submit payload during backfill
     let outcome = test_harness
         .tree
-        .on_new_payload(ExecutionData {
-            payload: payload.into(),
-            sidecar: ExecutionPayloadSidecar::none(),
-        })
+        .on_new_payload(
+            ExecutionData { payload: payload.into(), sidecar: ExecutionPayloadSidecar::none() },
+            Vec::new(),
+        )
         .unwrap();
 
     // Verify response is SYNCING
@@ -1296,10 +1296,10 @@ fn test_on_new_payload_malformed_payload() {
     // Submit the malformed payload
     let outcome = test_harness
         .tree
-        .on_new_payload(ExecutionData {
-            payload: payload.into(),
-            sidecar: ExecutionPayloadSidecar::none(),
-        })
+        .on_new_payload(
+            ExecutionData { payload: payload.into(), sidecar: ExecutionPayloadSidecar::none() },
+            Vec::new(),
+        )
         .unwrap();
 
     // For malformed payloads with incorrect hash, the current implementation
@@ -1345,10 +1345,10 @@ fn test_state_root_strategy_paths() {
     // Scenario 1: Test one strategy path
     let outcome1 = test_harness
         .tree
-        .on_new_payload(ExecutionData {
-            payload: payload1.into(),
-            sidecar: ExecutionPayloadSidecar::none(),
-        })
+        .on_new_payload(
+            ExecutionData { payload: payload1.into(), sidecar: ExecutionPayloadSidecar::none() },
+            Vec::new(),
+        )
         .unwrap();
 
     assert!(
@@ -1367,10 +1367,10 @@ fn test_state_root_strategy_paths() {
     // Scenario 2: Test different strategy path (disconnected)
     let outcome2 = test_harness
         .tree
-        .on_new_payload(ExecutionData {
-            payload: payload2.into(),
-            sidecar: ExecutionPayloadSidecar::none(),
-        })
+        .on_new_payload(
+            ExecutionData { payload: payload2.into(), sidecar: ExecutionPayloadSidecar::none() },
+            Vec::new(),
+        )
         .unwrap();
 
     assert!(outcome2.outcome.is_syncing(), "Second strategy path should work");
@@ -1663,7 +1663,7 @@ mod payload_execution_tests {
         };
 
         // Test the function directly
-        let result = test_harness.tree.try_insert_payload(payload);
+        let result = test_harness.tree.try_insert_payload(payload, Vec::new());
         // Should handle the payload gracefully
         assert!(result.is_ok(), "Should handle valid payload without error");
     }

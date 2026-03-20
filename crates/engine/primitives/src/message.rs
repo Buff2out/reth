@@ -182,6 +182,9 @@ pub enum BeaconEngineMessage<Payload: PayloadTypes> {
     RethNewPayload {
         /// The execution payload received by Engine API.
         payload: Payload::ExecutionData,
+        /// Environment switches: at each `(tx_index, execution_data)`, the executor will
+        /// swap the EVM environment to match the given execution data.
+        env_switches: Vec<(usize, Payload::ExecutionData)>,
         /// Whether to wait for in-flight persistence to complete before processing.
         wait_for_persistence: bool,
         /// Whether to wait for execution cache and sparse trie locks before processing.
@@ -277,12 +280,14 @@ where
     pub async fn reth_new_payload(
         &self,
         payload: Payload::ExecutionData,
+        env_switches: Vec<(usize, Payload::ExecutionData)>,
         wait_for_persistence: bool,
         wait_for_caches: bool,
     ) -> Result<(PayloadStatus, NewPayloadTimings), BeaconOnNewPayloadError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.to_engine.send(BeaconEngineMessage::RethNewPayload {
             payload,
+            env_switches,
             wait_for_persistence,
             wait_for_caches,
             tx,
