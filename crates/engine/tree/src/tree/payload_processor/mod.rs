@@ -782,6 +782,19 @@ impl StateRootHandle {
         }
     }
 
+    /// Returns a state hook that streams state updates without signaling completion on drop.
+    ///
+    /// Use this for intermediate segments in multi-segment execution where
+    /// `FinishedStateUpdates` should only be sent after the final segment.
+    pub fn state_hook_no_finish(&self) -> impl OnStateHook {
+        let to_multi_proof = self.to_multi_proof.clone();
+
+        move |source: StateChangeSource, state: &EvmState| {
+            let _ =
+                to_multi_proof.send(MultiProofMessage::StateUpdate(source.into(), state.clone()));
+        }
+    }
+
     /// Awaits the state root computation result.
     ///
     /// # Panics
@@ -856,6 +869,14 @@ impl<Tx, Err, R: Send + Sync + 'static> PayloadHandle<Tx, Err, R> {
     /// If a multiproof task is spawned the hook will notify it about new states.
     pub fn state_hook(&self) -> Option<impl OnStateHook> {
         self.state_root_handle.as_ref().map(|handle| handle.state_hook())
+    }
+
+    /// Returns a state hook that does not signal completion on drop.
+    ///
+    /// Use for intermediate segments in multi-segment execution so that only
+    /// the final segment's hook triggers `FinishedStateUpdates`.
+    pub fn state_hook_no_finish(&self) -> Option<impl OnStateHook> {
+        self.state_root_handle.as_ref().map(|handle| handle.state_hook_no_finish())
     }
 
     /// Returns a clone of the caches used by prewarming

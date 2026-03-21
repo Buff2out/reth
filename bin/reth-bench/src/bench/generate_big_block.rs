@@ -413,9 +413,11 @@ impl Command {
                 base.payload.as_v1_mut().parent_hash = prev_hash;
             }
 
-            // Merge blob versioned hashes from all constituent blocks into the base sidecar
+            // Merge blob versioned hashes from additional blocks into the base sidecar.
+            // Skip env_switch[0] (the base block clone) since its blob data is already
+            // in the base payload — including it would double-count versioned hashes.
             let additional_blocks: Vec<ExecutionData> =
-                env_switches.iter().map(|(_, data)| data.clone()).collect();
+                env_switches.iter().skip(1).map(|(_, data)| data.clone()).collect();
             merge_blob_data(&mut base, &additional_blocks);
 
             // Compute the real block hash from the mutated payload

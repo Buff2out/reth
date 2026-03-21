@@ -1010,15 +1010,37 @@ where
 
         let transaction_count = input.transaction_count();
         let executed_tx_index = Arc::clone(handle.executed_tx_index());
-        let mut executor = executor.with_state_hook(
-            handle.state_hook().map(|hook| Box::new(hook) as Box<dyn OnStateHook>),
-        );
+        let has_switches = !switch_indices_envs.is_empty();
 
-        // Pre-create state hooks for each env_switch segment so they can be attached
-        // to new executors without borrowing `handle` during the transaction loop.
+        // For multi-segment execution, use non-finishing hooks for all segments except the
+        // last. Each StateHookSender sends FinishedStateUpdates on drop, which would cause
+        // the sparse trie task to finalize prematurely when intermediate executors are dropped.
+        let mut executor = if has_switches {
+            executor.with_state_hook(
+                handle.state_hook_no_finish().map(|hook| Box::new(hook) as Box<dyn OnStateHook>),
+            )
+        } else {
+            executor.with_state_hook(
+                handle.state_hook().map(|hook| Box::new(hook) as Box<dyn OnStateHook>),
+            )
+        };
+
+        // Pre-create state hooks for each env_switch segment. The last hook uses
+        // state_hook() (with FinishedStateUpdates on drop) so the sparse trie task
+        // knows when all segments are done.
+        let num_switches = switch_indices_envs.len();
         let mut segment_state_hooks: Vec<Option<Box<dyn OnStateHook>>> = switch_indices_envs
             .iter()
-            .map(|_| handle.state_hook().map(|hook| Box::new(hook) as Box<dyn OnStateHook>))
+            .enumerate()
+            .map(|(i, _)| {
+                if i == num_switches - 1 {
+                    // Last segment: use finishing hook
+                    handle.state_hook().map(|hook| Box::new(hook) as Box<dyn OnStateHook>)
+                } else {
+                    // Intermediate segment: use non-finishing hook
+                    handle.state_hook_no_finish().map(|hook| Box::new(hook) as Box<dyn OnStateHook>)
+                }
+            })
             .collect();
 
         let execution_start = Instant::now();
@@ -1630,9 +1652,16 @@ where
         let start = Instant::now();
 
         trace!(target: "engine::tree::payload_validator", block=?block.num_hash(), "Validating block consensus (env_switches mode)");
-        // validate block consensus rules (header + tx root)
-        if let Err(e) = self.validate_block_inner(block, transaction_root) {
-            return Err(e.into())
+        // Skip full header validation (validate_block_inner) for env_switches blocks.
+        // The merged header has aggregated values (gas_limit, gas_used, blob_gas_used)
+        // that exceed single-block limits. Only validate the transaction root if provided.
+        if let Some(tx_root) = transaction_root {
+            if let Err(e) =
+                self.consensus.validate_block_pre_execution_with_tx_root(block, Some(tx_root))
+            {
+                error!(target: "engine::tree::payload_validator", ?block, "Failed to validate block {}: {e}", block.hash());
+                return Err(e.into());
+            }
         }
 
         // Skip validate_header_against_parent for env_switch blocks - the merged
