@@ -366,7 +366,6 @@ impl Command {
             base_v1.gas_limit = total_gas_limit;
             base_v1.receipts_root = final_receipts_root;
             base_v1.logs_bloom = final_logs_bloom;
-            base_v1.block_hash = B256::ZERO;
         }
 
         // Strip blob transactions from the merged payload and all env_switch payloads
@@ -374,6 +373,9 @@ impl Command {
         for (_, switch_data) in &mut env_switches {
             strip_blob_transactions(switch_data);
         }
+
+        // Compute the real block hash from the mutated payload
+        base.payload.as_v1_mut().block_hash = compute_payload_block_hash(&base)?;
 
         let big_block = BigBlockPayload { execution_data: base, env_switches };
 
@@ -396,4 +398,15 @@ impl Command {
 
         Ok(())
     }
+}
+
+/// Computes the block hash for an [`ExecutionData`] by converting it to a raw block
+/// and hashing the header.
+pub fn compute_payload_block_hash(data: &ExecutionData) -> eyre::Result<B256> {
+    let block = data
+        .payload
+        .clone()
+        .into_block_with_sidecar_raw(&data.sidecar)
+        .wrap_err("failed to convert payload to block for hash computation")?;
+    Ok(block.header.hash_slow())
 }

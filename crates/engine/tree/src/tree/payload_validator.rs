@@ -612,15 +612,26 @@ where
             handle.try_into_inner().expect("sole handle")
         });
 
-        // Skip post-execution validation for big blocks with env_switches since
-        // receipt cumulative gas counters reset at each segment boundary, causing the
-        // standard gas_used check (header vs last receipt) to fail.
         let hashed_state = if has_env_switches {
+            // For big blocks with env_switches, skip only the receipt-based post-execution
+            // checks (gas_used, receipts_root, logs_bloom) since receipt cumulative gas
+            // counters reset at each segment boundary. Keep all other validation
+            // (header, parent, tx root, hashed state) and always check state root.
             debug!(
                 target: "engine::tree::payload_validator",
-                "Skipping post-execution validation for big block with env_switches"
+                "Running selective post-execution validation for big block with env_switches"
             );
-            hashed_state
+            ensure_ok_post_block!(
+                self.validate_post_execution_env_switches(
+                    &block,
+                    &parent_block,
+                    &output,
+                    &mut ctx,
+                    transaction_root,
+                    hashed_state,
+                ),
+                block
+            )
         } else {
             ensure_ok_post_block!(
                 self.validate_post_execution(
@@ -764,9 +775,8 @@ where
             .record_state_root_gas_bucket(block.header().gas_used(), root_elapsed.as_secs_f64());
         debug!(target: "engine::tree::payload_validator", ?root_elapsed, "Calculated state root");
 
-        // ensure state root matches (skip for big blocks with env_switches since the
-        // header's state_root is from the original chain and won't match)
-        if !has_env_switches && state_root != block.header().state_root() {
+        // ensure state root matches
+        if state_root != block.header().state_root() {
             #[cfg(feature = "trie-debug")]
             Self::write_trie_debug_recorders(block.header().number(), &trie_debug_recorders);
 
@@ -1484,6 +1494,74 @@ where
             self.validator.validate_block_post_execution_with_hashed_state(hashed_state_ref, block)
         {
             // call post-block hook
+            self.on_invalid_block(parent_block, block, output, None, ctx.state_mut());
+            return Err(err.into())
+        }
+
+        // record post-execution validation duration
+        self.metrics
+            .block_validation
+            .post_execution_validation_duration
+            .record(start.elapsed().as_secs_f64());
+
+        Ok(hashed_state)
+    }
+
+    /// Validates post-execution state for big blocks with env_switches.
+    ///
+    /// This performs a subset of [`validate_post_execution`] checks, skipping receipt-based
+    /// validation (gas_used, receipts_root, logs_bloom) since receipt cumulative gas counters
+    /// reset at each segment boundary in env_switch blocks. Header validation, parent
+    /// validation, and hashed state validation are still performed.
+    #[instrument(level = "debug", target = "engine::tree::payload_validator", skip_all)]
+    fn validate_post_execution_env_switches<
+        T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>,
+    >(
+        &self,
+        block: &RecoveredBlock<N::Block>,
+        parent_block: &SealedHeader<N::BlockHeader>,
+        output: &BlockExecutionOutput<N::Receipt>,
+        ctx: &mut TreeCtx<'_, N>,
+        transaction_root: Option<B256>,
+        hashed_state: LazyHashedPostState,
+    ) -> Result<LazyHashedPostState, InsertBlockErrorKind>
+    where
+        V: PayloadValidator<T, Block = N::Block>,
+    {
+        let start = Instant::now();
+
+        trace!(target: "engine::tree::payload_validator", block=?block.num_hash(), "Validating block consensus (env_switches mode)");
+        // validate block consensus rules (header + tx root)
+        if let Err(e) = self.validate_block_inner(block, transaction_root) {
+            return Err(e.into())
+        }
+
+        // validate against the parent
+        let _enter = debug_span!(target: "engine::tree::payload_validator", "validate_header_against_parent").entered();
+        if let Err(e) =
+            self.consensus.validate_header_against_parent(block.sealed_header(), parent_block)
+        {
+            warn!(target: "engine::tree::payload_validator", ?block, "Failed to validate header {} against parent: {e}", block.hash());
+            return Err(e.into())
+        }
+        drop(_enter);
+
+        // Skip validate_block_post_execution - gas_used, receipts_root, logs_bloom
+        // are expected to diverge for merged env_switch blocks
+        debug!(
+            target: "engine::tree::payload_validator",
+            "Skipping receipt-based post-execution validation for env_switches block"
+        );
+
+        // Wait for the background keccak256 hashing task to complete
+        let hashed_state_ref =
+            debug_span!(target: "engine::tree::payload_validator", "wait_hashed_post_state")
+                .in_scope(|| hashed_state.get());
+
+        let _enter = debug_span!(target: "engine::tree::payload_validator", "validate_block_post_execution_with_hashed_state").entered();
+        if let Err(err) =
+            self.validator.validate_block_post_execution_with_hashed_state(hashed_state_ref, block)
+        {
             self.on_invalid_block(parent_block, block, output, None, ctx.state_mut());
             return Err(err.into())
         }

@@ -9,7 +9,8 @@ mod context;
 mod generate_big_block;
 pub(crate) mod helpers;
 pub use generate_big_block::{
-    BigBlockPayload, RawTransaction, RpcTransactionSource, TransactionCollector, TransactionSource,
+    compute_payload_block_hash, BigBlockPayload, RawTransaction, RpcTransactionSource,
+    TransactionCollector, TransactionSource,
 };
 pub(crate) mod metrics_scraper;
 mod new_payload_fcu;
