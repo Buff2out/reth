@@ -14,7 +14,9 @@ use revm::{
 use revmc::alloy_evm as jit;
 
 pub use jit::JitEvm;
-pub use revmc::runtime::{JitCoordinator, JitCoordinatorHandle, RuntimeConfig};
+pub use revmc::runtime::{
+    JitCoordinator, JitCoordinatorHandle, RuntimeConfig, RuntimeStatsSnapshot,
+};
 
 /// Newtype around [`revmc::alloy_evm::JitEvmFactory`] that implements [`Debug`].
 #[derive(Clone)]
@@ -100,4 +102,13 @@ impl RevmcRuntime {
     pub fn shutdown(self) -> eyre::Result<()> {
         self.coordinator.shutdown()
     }
+}
+
+/// Records revmc JIT runtime stats as Prometheus metrics.
+pub fn record_revmc_metrics(stats: &RuntimeStatsSnapshot) {
+    metrics::gauge!("revmc_jit_lookup_hits").set(stats.lookup_hits as f64);
+    metrics::gauge!("revmc_jit_lookup_misses").set(stats.lookup_misses as f64);
+    metrics::gauge!("revmc_jit_events_sent").set(stats.events_sent as f64);
+    metrics::gauge!("revmc_jit_events_dropped").set(stats.events_dropped as f64);
+    metrics::gauge!("revmc_jit_resident_entries").set(stats.resident_entries as f64);
 }

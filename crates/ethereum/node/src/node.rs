@@ -466,6 +466,21 @@ where
             );
         }
 
+        // Periodically record JIT metrics.
+        let metrics_handle = runtime.handle();
+        ctx.task_executor().spawn_with_graceful_shutdown_signal(|shutdown| async move {
+            let mut shutdown = std::pin::pin!(shutdown);
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                        let stats = metrics_handle.stats();
+                        reth_evm_ethereum::revmc::record_revmc_metrics(&stats);
+                    }
+                    _ = &mut shutdown => break,
+                }
+            }
+        });
+
         // Keep the coordinator alive until node shutdown.
         ctx.task_executor().spawn_critical_with_graceful_shutdown_signal(
             "revmc-jit-coordinator",
