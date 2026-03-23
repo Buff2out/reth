@@ -647,14 +647,7 @@ where
         let block = block.with_senders(senders);
 
         // Wait for the receipt root computation to complete.
-        // For env_switches blocks, the streamed receipts have per-segment cumulative gas
-        // (the background task received them before correction), so we skip the pre-computed
-        // receipt root and let validation recompute it from the corrected receipts.
-        let receipt_root_bloom = if has_env_switches {
-            // Still receive to avoid a leaked task, but discard the result.
-            let _ = receipt_root_rx.blocking_recv();
-            None
-        } else {
+        let receipt_root_bloom = {
             let _enter = debug_span!(
                 target: "engine::tree::payload_validator",
                 "wait_receipt_root",
@@ -1100,6 +1093,7 @@ where
                 &mut senders,
                 &mut last_sent_len,
                 Some(switch_idx),
+                accumulated_gas_used,
             )?;
 
             // Finish the current executor (applies post-execution changes: withdrawals,
@@ -1193,6 +1187,7 @@ where
             &mut senders,
             &mut last_sent_len,
             None,
+            accumulated_gas_used,
         )?;
         drop(receipt_tx);
 
@@ -1276,12 +1271,14 @@ where
         senders: &mut Vec<Address>,
         last_sent_len: &mut usize,
         stop_before: Option<usize>,
+        gas_offset: u64,
     ) -> Result<(), BlockExecutionError>
     where
         E: BlockExecutor<Receipt = N::Receipt>,
         Tx: alloy_evm::block::ExecutableTx<E> + alloy_evm::RecoveredTx<InnerTx>,
         InnerTx: TxHashRef,
         Err: core::error::Error + Send + Sync + 'static,
+        N::Receipt: AdjustCumulativeGas,
     {
         let exec_span = debug_span!(target: "engine::tree", "execution").entered();
         loop {
@@ -1324,9 +1321,15 @@ where
                 // Send the latest receipt to the background task for incremental root computation.
                 // Use senders.len() - 1 as the global tx index (senders accumulates across
                 // env_switch segments, unlike executor.receipts() which resets per segment).
+                // Apply gas_offset so the receipt has globally-correct cumulative_gas_used.
                 if let Some(receipt) = executor.receipts().last() {
                     let tx_index = senders.len() - 1;
-                    let _ = receipt_tx.send(IndexedReceipt::new(tx_index, receipt.clone()));
+                    let corrected = if gas_offset > 0 {
+                        receipt.with_gas_offset(gas_offset)
+                    } else {
+                        receipt.clone()
+                    };
+                    let _ = receipt_tx.send(IndexedReceipt::new(tx_index, corrected));
                 }
             }
         }
