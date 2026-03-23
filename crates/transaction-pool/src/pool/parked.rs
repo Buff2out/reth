@@ -1,13 +1,12 @@
 use crate::{
-    identifier::{SenderId, TransactionId},
+    identifier::{SenderId, SenderSlotMap, TransactionId},
     pool::size::SizeTracker,
     PoolTransaction, SubPoolLimit, ValidPoolTransaction, TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER,
 };
-use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::{
     cmp::Ordering,
-    collections::{hash_map::Entry, BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet},
     ops::{Bound::Unbounded, Deref},
     sync::Arc,
 };
@@ -33,7 +32,7 @@ pub struct ParkedPool<T: ParkedOrd> {
     last_sender_submission: BTreeSet<SubmissionSenderId>,
     /// Keeps track of the number of transactions in the pool by the sender and the last submission
     /// id.
-    sender_transaction_count: FxHashMap<SenderId, SenderTransactionCount>,
+    sender_transaction_count: SenderSlotMap<SenderTransactionCount>,
     /// Keeps track of the size of this pool.
     ///
     /// See also [`reth_primitives_traits::InMemorySize::size`].
@@ -66,20 +65,18 @@ impl<T: ParkedOrd> ParkedPool<T> {
     /// Increments the count of transactions for the given sender and updates the tracked submission
     /// id.
     fn add_sender_count(&mut self, sender: SenderId, submission_id: u64) {
-        match self.sender_transaction_count.entry(sender) {
-            Entry::Occupied(mut entry) => {
-                let value = entry.get_mut();
-                // remove the __currently__ tracked submission id
-                self.last_sender_submission
-                    .remove(&SubmissionSenderId::new(sender, value.last_submission_id));
+        if let Some(value) = self.sender_transaction_count.get_mut(&sender) {
+            // remove the __currently__ tracked submission id
+            self.last_sender_submission
+                .remove(&SubmissionSenderId::new(sender, value.last_submission_id));
 
-                value.count += 1;
-                value.last_submission_id = submission_id;
-            }
-            Entry::Vacant(entry) => {
-                entry
-                    .insert(SenderTransactionCount { count: 1, last_submission_id: submission_id });
-            }
+            value.count += 1;
+            value.last_submission_id = submission_id;
+        } else {
+            self.sender_transaction_count.insert(
+                sender,
+                SenderTransactionCount { count: 1, last_submission_id: submission_id },
+            );
         }
         // insert a new entry
         self.last_sender_submission.insert(SubmissionSenderId::new(sender, submission_id));
@@ -92,21 +89,17 @@ impl<T: ParkedOrd> ParkedPool<T> {
     /// Note: this does not update the tracked submission id for the sender, because we're only
     /// interested in the __last__ submission id when truncating the pool.
     fn remove_sender_count(&mut self, sender_id: SenderId) {
-        let removed_sender = match self.sender_transaction_count.entry(sender_id) {
-            Entry::Occupied(mut entry) => {
-                let value = entry.get_mut();
-                value.count -= 1;
-                if value.count == 0 {
-                    entry.remove()
-                } else {
-                    return
-                }
-            }
-            Entry::Vacant(_) => {
-                // This should never happen because the bisection between the two maps
-                unreachable!("sender count not found {:?}", sender_id);
-            }
+        let Some(value) = self.sender_transaction_count.get_mut(&sender_id) else {
+            unreachable!("sender count not found {:?}", sender_id);
         };
+
+        value.count -= 1;
+        if value.count > 0 {
+            return;
+        }
+
+        let removed_sender =
+            self.sender_transaction_count.remove(&sender_id).expect("sender count not found");
 
         // all transactions for this sender have been removed
         assert!(

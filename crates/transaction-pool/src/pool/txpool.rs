@@ -6,7 +6,7 @@ use crate::{
         Eip4844PoolTransactionError, Eip7702PoolTransactionError, InvalidPoolTransactionError,
         PoolError, PoolErrorKind,
     },
-    identifier::{SenderId, TransactionId},
+    identifier::{SenderId, SenderSlotMap, TransactionId},
     metrics::{AllTransactionsMetrics, TxPoolMetrics},
     pool::{
         best::BestTransactions,
@@ -37,7 +37,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::{
     cmp::Ordering,
-    collections::{btree_map::Entry, hash_map, BTreeMap, HashMap, HashSet},
+    collections::{btree_map::Entry, BTreeMap, HashMap, HashSet},
     fmt,
     ops::Bound::{Excluded, Unbounded},
     sync::Arc,
@@ -761,8 +761,7 @@ impl<T: TransactionOrdering> TxPool<T> {
         // Update sender info with balance and nonce
         self.all_transactions
             .sender_info
-            .entry(tx.sender_id())
-            .or_default()
+            .get_or_insert_default(tx.sender_id())
             .update(on_chain_nonce, on_chain_balance);
 
         match self.all_transactions.insert_tx(tx, on_chain_balance, on_chain_nonce) {
@@ -1391,9 +1390,9 @@ pub(crate) struct AllTransactions<T: PoolTransaction> {
     /// _All_ transaction in the pool sorted by their sender and nonce pair.
     txs: BTreeMap<TransactionId, PoolInternalTransaction<T>>,
     /// Contains the currently known information about the senders.
-    sender_info: FxHashMap<SenderId, SenderInfo>,
+    sender_info: SenderSlotMap<SenderInfo>,
     /// Tracks the number of transactions by sender that are currently in the pool.
-    tx_counter: FxHashMap<SenderId, usize>,
+    tx_counter: SenderSlotMap<usize>,
     /// The current block number the pool keeps track of.
     last_seen_block_number: u64,
     /// The current block hash the pool keeps track of.
@@ -1405,7 +1404,7 @@ pub(crate) struct AllTransactions<T: PoolTransaction> {
     /// How to handle [`TransactionOrigin::Local`](crate::TransactionOrigin) transactions.
     local_transactions_config: LocalTransactionConfig,
     /// All accounts with a pooled authorization
-    auths: FxHashMap<SenderId, HashSet<TxHash>>,
+    auths: SenderSlotMap<HashSet<TxHash>>,
     /// All Transactions metrics
     metrics: AllTransactionsMetrics,
 }
@@ -1448,17 +1447,15 @@ impl<T: PoolTransaction> AllTransactions<T> {
 
     /// Increments the transaction counter for the sender
     pub(crate) fn tx_inc(&mut self, sender: SenderId) {
-        let count = self.tx_counter.entry(sender).or_default();
-        *count += 1;
+        *self.tx_counter.get_or_insert_default(sender) += 1;
         self.metrics.all_transactions_by_all_senders.increment(1.0);
     }
 
     /// Decrements the transaction counter for the sender
     pub(crate) fn tx_decr(&mut self, sender: SenderId) {
-        if let hash_map::Entry::Occupied(mut entry) = self.tx_counter.entry(sender) {
-            let count = entry.get_mut();
+        if let Some(count) = self.tx_counter.get_mut(&sender) {
             if *count == 1 {
-                entry.remove();
+                self.tx_counter.remove(&sender);
                 self.sender_info.remove(&sender);
                 self.metrics.all_transactions_by_all_senders.decrement(1.0);
                 return
@@ -1822,11 +1819,14 @@ impl<T: PoolTransaction> AllTransactions<T> {
 
         let tx_hash = tx.transaction.hash();
         for auth in auths {
-            if let Some(list) = self.auths.get_mut(auth) {
+            let should_remove = if let Some(list) = self.auths.get_mut(auth) {
                 list.remove(tx_hash);
-                if list.is_empty() {
-                    self.auths.remove(auth);
-                }
+                list.is_empty()
+            } else {
+                false
+            };
+            if should_remove {
+                self.auths.remove(auth);
             }
         }
     }
@@ -2080,7 +2080,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
         if let Some(auths) = &transaction.authority_ids {
             let tx_hash = transaction.hash();
             for auth in auths {
-                self.auths.entry(*auth).or_default().insert(*tx_hash);
+                self.auths.get_or_insert_default(*auth).insert(*tx_hash);
             }
         }
 

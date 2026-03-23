@@ -1,20 +1,15 @@
 //! Pending transactions
 
 use crate::{
-    identifier::{SenderId, TransactionId},
+    identifier::{SenderId, SenderSlotMap, TransactionId},
     pool::{
         best::{BestTransactions, BestTransactionsWithFees},
         size::SizeTracker,
     },
     Priority, SubPoolLimit, TransactionOrdering, ValidPoolTransaction,
 };
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::{
-    cmp::Ordering,
-    collections::{hash_map::Entry, BTreeMap},
-    ops::Bound::Unbounded,
-    sync::Arc,
-};
+use rustc_hash::FxHashSet;
+use std::{cmp::Ordering, collections::BTreeMap, ops::Bound::Unbounded, sync::Arc};
 use tokio::sync::broadcast;
 
 /// A pool of validated and gapless transactions that are ready to be executed on the current state
@@ -39,10 +34,10 @@ pub struct PendingPool<T: TransactionOrdering> {
     by_id: BTreeMap<TransactionId, PendingTransaction<T>>,
     /// The highest nonce transactions for each sender - like the `independent` set, but the
     /// highest instead of lowest nonce.
-    highest_nonces: FxHashMap<SenderId, PendingTransaction<T>>,
+    highest_nonces: SenderSlotMap<PendingTransaction<T>>,
     /// Independent transactions that can be included directly and don't require other
     /// transactions.
-    independent_transactions: FxHashMap<SenderId, PendingTransaction<T>>,
+    independent_transactions: SenderSlotMap<PendingTransaction<T>>,
     /// Keeps track of the size of this pool.
     ///
     /// See also [`reth_primitives_traits::InMemorySize::size`].
@@ -254,25 +249,20 @@ impl<T: TransactionOrdering> PendingPool<T> {
     /// Updates the independent transaction and highest nonces set, assuming the given transaction
     /// is being _added_ to the pool.
     fn update_independents_and_highest_nonces(&mut self, tx: &PendingTransaction<T>) {
-        match self.highest_nonces.entry(tx.transaction.sender_id()) {
-            Entry::Occupied(mut entry) => {
-                if entry.get().transaction.nonce() < tx.transaction.nonce() {
-                    *entry.get_mut() = tx.clone();
-                }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(tx.clone());
-            }
+        let sender = tx.transaction.sender_id();
+        if self
+            .highest_nonces
+            .get(&sender)
+            .is_none_or(|existing| existing.transaction.nonce() < tx.transaction.nonce())
+        {
+            self.highest_nonces.insert(sender, tx.clone());
         }
-        match self.independent_transactions.entry(tx.transaction.sender_id()) {
-            Entry::Occupied(mut entry) => {
-                if entry.get().transaction.nonce() > tx.transaction.nonce() {
-                    *entry.get_mut() = tx.clone();
-                }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(tx.clone());
-            }
+        if self
+            .independent_transactions
+            .get(&sender)
+            .is_none_or(|existing| existing.transaction.nonce() > tx.transaction.nonce())
+        {
+            self.independent_transactions.insert(sender, tx.clone());
         }
     }
 
@@ -332,33 +322,25 @@ impl<T: TransactionOrdering> PendingPool<T> {
         let tx = self.by_id.remove(id)?;
         self.size_of -= tx.transaction.size();
 
-        match self.highest_nonces.entry(id.sender) {
-            Entry::Occupied(mut entry) => {
-                if entry.get().transaction.nonce() == id.nonce {
-                    // we just removed the tx with the highest nonce for this sender, find the
-                    // highest remaining tx from that sender
-                    if let Some((_, new_highest)) = self
-                        .by_id
-                        .range((
-                            id.sender.start_bound(),
-                            std::ops::Bound::Included(TransactionId::new(id.sender, u64::MAX)),
-                        ))
-                        .last()
-                    {
-                        // insert the new highest nonce for this sender
-                        entry.insert(new_highest.clone());
-                    } else {
-                        entry.remove();
-                    }
+        if let Some(highest) = self.highest_nonces.get(&id.sender) {
+            if highest.transaction.nonce() == id.nonce {
+                // we just removed the tx with the highest nonce for this sender, find the
+                // highest remaining tx from that sender
+                if let Some((_, new_highest)) = self
+                    .by_id
+                    .range((
+                        id.sender.start_bound(),
+                        std::ops::Bound::Included(TransactionId::new(id.sender, u64::MAX)),
+                    ))
+                    .last()
+                {
+                    self.highest_nonces.insert(id.sender, new_highest.clone());
+                } else {
+                    self.highest_nonces.remove(&id.sender);
                 }
             }
-            Entry::Vacant(_) => {
-                debug_assert!(
-                    false,
-                    "removed transaction without a tracked highest nonce {:?}",
-                    id
-                );
-            }
+        } else {
+            debug_assert!(false, "removed transaction without a tracked highest nonce {:?}", id);
         }
 
         Some(tx.transaction)
@@ -530,7 +512,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
     }
 
     /// Independent transactions
-    pub const fn independent_transactions(&self) -> &FxHashMap<SenderId, PendingTransaction<T>> {
+    pub const fn independent_transactions(&self) -> &SenderSlotMap<PendingTransaction<T>> {
         &self.independent_transactions
     }
 
@@ -585,7 +567,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
 
     /// Returns a reference to the independent transactions in the pool
     #[cfg(test)]
-    pub(crate) const fn independent(&self) -> &FxHashMap<SenderId, PendingTransaction<T>> {
+    pub(crate) const fn independent(&self) -> &SenderSlotMap<PendingTransaction<T>> {
         &self.independent_transactions
     }
 

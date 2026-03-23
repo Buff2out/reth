@@ -1,6 +1,5 @@
 //! Identifier types for transactions and senders.
 use alloy_primitives::{map::AddressMap, Address};
-use rustc_hash::FxHashMap;
 
 /// An internal mapping of addresses.
 ///
@@ -13,7 +12,7 @@ pub struct SenderIdentifiers {
     /// Assigned [`SenderId`] for an [`Address`].
     address_to_id: AddressMap<SenderId>,
     /// Reverse mapping of [`SenderId`] to [`Address`].
-    sender_to_address: FxHashMap<SenderId, Address>,
+    sender_to_address: SenderSlotMap<Address>,
 }
 
 impl SenderIdentifiers {
@@ -76,11 +75,132 @@ impl SenderId {
     pub const fn into_transaction_id(self, nonce: u64) -> TransactionId {
         TransactionId::new(self, nonce)
     }
+
+    /// Returns the inner id as a `usize` index for use with [`SenderSlotMap`].
+    #[inline]
+    const fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 impl From<u64> for SenderId {
     fn from(value: u64) -> Self {
         Self(value)
+    }
+}
+
+/// A dense, `Vec`-backed map keyed by [`SenderId`].
+///
+/// Since `SenderId` values are monotonically assigned starting from 0, this avoids all hashing
+/// overhead and provides O(1) indexed access with better cache locality than a `HashMap`.
+#[derive(Debug, Clone)]
+pub struct SenderSlotMap<T> {
+    slots: Vec<Option<T>>,
+    len: usize,
+}
+
+impl<T> Default for SenderSlotMap<T> {
+    fn default() -> Self {
+        Self { slots: Vec::new(), len: 0 }
+    }
+}
+
+impl<T> SenderSlotMap<T> {
+    /// Returns a reference to the value for the given sender, if present.
+    #[inline]
+    pub fn get(&self, id: &SenderId) -> Option<&T> {
+        self.slots.get(id.index())?.as_ref()
+    }
+
+    /// Returns a mutable reference to the value for the given sender, if present.
+    #[inline]
+    pub fn get_mut(&mut self, id: &SenderId) -> Option<&mut T> {
+        self.slots.get_mut(id.index())?.as_mut()
+    }
+
+    /// Inserts a value for the given sender, returning the previous value if any.
+    pub fn insert(&mut self, id: SenderId, value: T) -> Option<T> {
+        let idx = id.index();
+        if idx >= self.slots.len() {
+            self.slots.resize_with(idx + 1, || None);
+        }
+        let old = self.slots[idx].replace(value);
+        if old.is_none() {
+            self.len += 1;
+        }
+        old
+    }
+
+    /// Removes and returns the value for the given sender.
+    pub fn remove(&mut self, id: &SenderId) -> Option<T> {
+        let slot = self.slots.get_mut(id.index())?;
+        let old = slot.take()?;
+        self.len -= 1;
+        Some(old)
+    }
+
+    /// Returns `true` if the map contains a value for the given sender.
+    #[inline]
+    pub fn contains_key(&self, id: &SenderId) -> bool {
+        self.slots.get(id.index()).is_some_and(|s| s.is_some())
+    }
+
+    /// Returns the number of occupied entries.
+    #[inline]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns `true` if there are no occupied entries.
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Removes all entries.
+    pub fn clear(&mut self) {
+        self.slots.clear();
+        self.len = 0;
+    }
+
+    /// Returns an iterator over all values.
+    pub fn values(&self) -> impl Iterator<Item = &T> {
+        self.slots.iter().filter_map(|s| s.as_ref())
+    }
+
+    /// Returns an iterator over all `(SenderId, &T)` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (SenderId, &T)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.as_ref().map(|v| (SenderId(i as u64), v)))
+    }
+
+    /// Returns a mutable reference to the value for the given sender, inserting the default if
+    /// absent.
+    pub fn get_or_insert_default(&mut self, id: SenderId) -> &mut T
+    where
+        T: Default,
+    {
+        let idx = id.index();
+        if idx >= self.slots.len() {
+            self.slots.resize_with(idx + 1, || None);
+        }
+        if self.slots[idx].is_none() {
+            self.slots[idx] = Some(T::default());
+            self.len += 1;
+        }
+        self.slots[idx].as_mut().unwrap()
+    }
+
+    /// Extends the map with the contents of an iterator.
+    pub fn extend<I>(&mut self, iter: I)
+    where
+        I: IntoIterator<Item = (SenderId, T)>,
+    {
+        for (id, value) in iter {
+            self.insert(id, value);
+        }
     }
 }
 
@@ -274,5 +394,74 @@ mod tests {
         } else {
             panic!("Expected included bound");
         }
+    }
+
+    #[test]
+    fn test_sender_slot_map_insert_get_remove() {
+        let mut map = SenderSlotMap::default();
+        let id0 = SenderId(0);
+        let id5 = SenderId(5);
+
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
+        map.insert(id0, 10u32);
+        map.insert(id5, 50u32);
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&id0), Some(&10));
+        assert_eq!(map.get(&id5), Some(&50));
+        assert_eq!(map.get(&SenderId(3)), None);
+        assert!(map.contains_key(&id0));
+        assert!(!map.contains_key(&SenderId(3)));
+
+        // overwrite
+        map.insert(id0, 11);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&id0), Some(&11));
+
+        // remove
+        assert_eq!(map.remove(&id0), Some(11));
+        assert_eq!(map.len(), 1);
+        assert!(!map.contains_key(&id0));
+
+        // remove non-existent
+        assert_eq!(map.remove(&SenderId(99)), None);
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_sender_slot_map_values_and_iter() {
+        let mut map = SenderSlotMap::default();
+        map.insert(SenderId(1), "a");
+        map.insert(SenderId(3), "b");
+        map.insert(SenderId(5), "c");
+
+        let values: Vec<_> = map.values().collect();
+        assert_eq!(values, vec![&"a", &"b", &"c"]);
+
+        let pairs: Vec<_> = map.iter().collect();
+        assert_eq!(pairs, vec![(SenderId(1), &"a"), (SenderId(3), &"b"), (SenderId(5), &"c")]);
+    }
+
+    #[test]
+    fn test_sender_slot_map_get_or_insert_default() {
+        let mut map = SenderSlotMap::<usize>::default();
+        let id = SenderId(2);
+        *map.get_or_insert_default(id) += 1;
+        *map.get_or_insert_default(id) += 1;
+        assert_eq!(map.get(&id), Some(&2));
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_sender_slot_map_clear() {
+        let mut map = SenderSlotMap::default();
+        map.insert(SenderId(0), 1);
+        map.insert(SenderId(1), 2);
+        assert_eq!(map.len(), 2);
+        map.clear();
+        assert!(map.is_empty());
+        assert_eq!(map.get(&SenderId(0)), None);
     }
 }
