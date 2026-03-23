@@ -252,7 +252,7 @@ fi
 
 if [ "$BIG_BLOCKS" = "true" ]; then
   # Big blocks mode: replay pre-generated payloads
-  BIG_BLOCKS_DIR="${BENCH_WORK_DIR}/big-blocks"
+  BIG_BLOCKS_DIR="${BENCH_BIG_BLOCKS_DIR:-${BENCH_WORK_DIR}/big-blocks}"
 
   # Start tracy-capture so profile only covers the benchmark
   if [ "${BENCH_TRACY:-off}" != "off" ]; then
