@@ -496,7 +496,7 @@ where
         // run them in parallel when hashed state is enabled.
         if provider.cached_storage_settings().use_hashed_state() {
             let (hashed_state, write_result) = rayon::join(
-                || state.hash_state_slow::<KeccakKeyHasher>(),
+                || state.hash_state_slow::<KeccakKeyHasher>().into_sorted(),
                 || {
                     provider.write_state(
                         &state,
@@ -506,7 +506,7 @@ where
                 },
             );
             write_result?;
-            provider.write_hashed_state(&hashed_state.into_sorted())?;
+            provider.write_hashed_state(&hashed_state)?;
         } else {
             provider.write_state(&state, OriginalValuesKnown::Yes, StateWriteConfig::default())?;
         }
