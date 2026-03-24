@@ -31,6 +31,11 @@ pub struct JitArgs {
     /// `<datadir>/jit/<spec_id>/<code_hash>/` for each compiled contract.
     #[arg(long = "jit.debug", default_value_t = false, help_heading = "JIT")]
     pub debug: bool,
+
+    /// Blocking mode: synchronously JIT-compile every contract on first encounter.
+    /// Implies --jit. Intended for debugging only.
+    #[arg(long = "jit.blocking", default_value_t = false, help_heading = "JIT")]
+    pub blocking: bool,
 }
 
 impl JitArgs {
@@ -48,6 +53,7 @@ impl Default for JitArgs {
             channel_capacity: Self::DEFAULT_CHANNEL_CAPACITY,
             max_pending_jobs: Self::DEFAULT_MAX_PENDING_JOBS,
             debug: false,
+            blocking: false,
         }
     }
 }

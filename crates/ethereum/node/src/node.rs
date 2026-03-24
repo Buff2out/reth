@@ -457,10 +457,11 @@ where
             if jit.debug { Some(ctx.config().datadir().data_dir().join("jit")) } else { None };
 
         let config = RuntimeConfig {
-            enabled: jit.enabled,
+            enabled: jit.enabled || jit.blocking,
             tuning,
             dump_dir,
             debug_assertions: jit.debug,
+            blocking: jit.blocking,
             ..Default::default()
         };
         let backend = JitBackend::start(config)?;
