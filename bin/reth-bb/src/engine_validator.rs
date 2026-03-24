@@ -739,19 +739,32 @@ where
             all_requests.extend(result.requests);
             gas_offset += result.gas_used;
             blob_gas_used += result.blob_gas_used;
+            let expected_seg_gas = segment.execution_data.gas_used();
             debug!(
                 target: "engine::bb",
-                seg_idx, segment_gas = result.gas_used, gas_offset,
+                seg_idx,
+                block_number = segment.execution_data.block_number(),
+                expected_seg_gas,
+                actual_seg_gas = result.gas_used,
+                gas_offset,
+                receipts = result.receipts.len(),
                 "Segment finished"
             );
 
-            // Seed this segment's block hash for BLOCKHASH in subsequent segments
-            if !is_final {
-                let seg_block_number = segment.execution_data.block_number();
-                if seg_block_number > 0 {
-                    db.block_hashes
-                        .insert(seg_block_number - 1, segment.execution_data.parent_hash());
-                }
+            // Seed this segment's block hash for BLOCKHASH in subsequent segments.
+            // The next segment needs to look up the current segment's block hash via
+            // BLOCKHASH(current_block_number). We derive this from the next segment's
+            // parent_hash (which is the current segment's block hash) and block_number.
+            if seg_idx + 1 < num_segments {
+                let next_seg = &plan.segments[seg_idx + 1];
+                let finished_block_number = next_seg.execution_data.block_number() - 1;
+                let finished_block_hash = next_seg.execution_data.parent_hash();
+                db.block_hashes.insert(finished_block_number, finished_block_hash);
+                trace!(
+                    target: "engine::bb",
+                    finished_block_number, ?finished_block_hash,
+                    "Seeded inter-segment block hash"
+                );
             }
         }
 
@@ -764,10 +777,7 @@ where
             result: reth_evm::block::BlockExecutionResult {
                 receipts: all_receipts,
                 requests: all_requests,
-                // Use the merged payload header's gas_used rather than summing
-                // segment results, because segment finish() may not account for
-                // all gas (e.g., system calls in apply_pre_execution_changes).
-                gas_used: env.gas_used,
+                gas_used: gas_offset,
                 blob_gas_used,
             },
             state: db.take_bundle(),
