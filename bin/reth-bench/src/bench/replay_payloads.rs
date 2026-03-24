@@ -59,8 +59,7 @@ pub struct Command {
     #[arg(long, value_name = "SKIP", default_value = "0")]
     skip: usize,
 
-    /// Deprecated: gas ramp is no longer needed. Use `--testing.skip-gas-limit-ramp-check`
-    /// and `--testing.gas-limit` on the reth node instead. This flag is accepted but ignored.
+    /// Deprecated: gas ramp is no longer needed. This flag is accepted but ignored.
     #[arg(long, value_name = "GAS_RAMP_DIR", hide = true)]
     gas_ramp_dir: Option<PathBuf>,
 
@@ -164,8 +163,7 @@ impl Command {
         if self.gas_ramp_dir.is_some() {
             warn!(
                 target: "reth-bench",
-                "--gas-ramp-dir is deprecated and ignored. Use --testing.skip-gas-limit-ramp-check \
-                 and --testing.gas-limit on the reth node instead."
+                "--gas-ramp-dir is deprecated and ignored."
             );
         }
 
