@@ -372,16 +372,19 @@ impl EngineNodeLauncher {
                             );
                         }
                     }
-                    _ = &mut on_graceful_shutdown => {
+                    guard = &mut on_graceful_shutdown => {
                         // Shutdown signal received.
                         // Send Terminate so the engine OS thread can exit cleanly before we
                         // drop the orchestrator.
+                        // Hold the guard until persistence is complete so the runtime doesn't
+                        // shut down while blocks are still being flushed to disk.
                         debug!(target: "reth::cli", "shutdown signal received, terminating engine");
                         let (done_tx, done_rx) = oneshot::channel();
                         orchestrator.handler_mut().handler_mut().on_event(
                             FromOrchestrator::Terminate { tx: done_tx }.into()
                         );
                         let _ = done_rx.await;
+                        drop(guard);
                         break;
                     }
                 }
@@ -390,7 +393,7 @@ impl EngineNodeLauncher {
             let _ = exit.send(res);
         };
         ctx.task_executor()
-            .spawn_critical_with_shutdown_signal("consensus engine", consensus_engine);
+            .spawn_critical_with_graceful_shutdown_signal("consensus engine", consensus_engine);
 
         let engine_events_for_ethstats = engine_events.new_listener();
 
