@@ -1,3 +1,4 @@
+//! reth-bb: a modified reth node for benchmarking big block execution.
 #![allow(missing_docs)]
 
 #[global_allocator]
@@ -75,7 +76,7 @@ pub trait BbRethEngineApi {
     ) -> RpcResult<ForkchoiceUpdated>;
 }
 
-/// Server-side implementation of [`BbRethEngineApi`].
+/// Server-side implementation of `BbRethEngineApi`.
 #[derive(Debug)]
 struct BbRethEngineApiHandler {
     pending: BigBlockMap,

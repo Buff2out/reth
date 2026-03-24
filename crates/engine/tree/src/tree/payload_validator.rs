@@ -52,7 +52,7 @@ use alloy_consensus::transaction::{Either, TxHashRef};
 use alloy_eip7928::BlockAccessList;
 use alloy_eips::{eip1898::BlockWithParent, eip4895::Withdrawal, NumHash};
 use alloy_evm::Evm;
-use alloy_primitives::{map::B256Set, B256};
+use alloy_primitives::{map::B256Set, Bloom, B256};
 #[cfg(feature = "trie-debug")]
 use reth_trie_sparse::debug_recorder::TrieDebugRecorder;
 
@@ -624,7 +624,7 @@ where
         // as transactions complete, allowing parallel computation during execution.
         let execute_block_start = Instant::now();
         let execute_result = {
-            let BasicEngineValidator {
+            let Self {
                 ref evm_config,
                 ref config,
                 ref payload_processor,
@@ -1873,6 +1873,13 @@ where
     }
 }
 
+/// Result of [`EngineValidatorBlockExecutor::execute_block`]: the execution output, the list of
+/// senders, and a receiver for the asynchronously computed receipt root and bloom.
+pub type ExecuteBlockResult<R> = Result<
+    (BlockExecutionOutput<R>, Vec<Address>, tokio::sync::oneshot::Receiver<(B256, Bloom)>),
+    InsertBlockErrorKind,
+>;
+
 /// Strategy for executing a block within [`BasicEngineValidator`].
 ///
 /// The default implementation ([`BasicEngineValidatorBlockExecutor`]) handles standard
@@ -1890,14 +1897,7 @@ pub trait EngineValidatorBlockExecutor<N: NodePrimitives, Evm: ConfigureEvm<Prim
         env: ExecutionEnv<Evm>,
         input: &BlockOrPayload<T>,
         handle: &mut PayloadHandle<Tx, Err, N::Receipt>,
-    ) -> Result<
-        (
-            BlockExecutionOutput<N::Receipt>,
-            Vec<Address>,
-            tokio::sync::oneshot::Receiver<(B256, alloy_primitives::Bloom)>,
-        ),
-        InsertBlockErrorKind,
-    >
+    ) -> ExecuteBlockResult<N::Receipt>
     where
         S: StateProvider + Send,
         Tx: ExecutableTxFor<Evm>,
@@ -1922,14 +1922,7 @@ where
         env: ExecutionEnv<Evm>,
         input: &BlockOrPayload<T>,
         handle: &mut PayloadHandle<Tx, Err, N::Receipt>,
-    ) -> Result<
-        (
-            BlockExecutionOutput<N::Receipt>,
-            Vec<Address>,
-            tokio::sync::oneshot::Receiver<(B256, alloy_primitives::Bloom)>,
-        ),
-        InsertBlockErrorKind,
-    >
+    ) -> ExecuteBlockResult<N::Receipt>
     where
         S: StateProvider + Send,
         Tx: ExecutableTxFor<Evm>,

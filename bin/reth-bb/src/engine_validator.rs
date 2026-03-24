@@ -18,7 +18,7 @@ use reth_engine_tree::tree::{
     payload_processor::receipt_root_task::{IndexedReceipt, ReceiptRootTaskHandle},
     payload_validator::{
         BasicEngineValidator, BasicEngineValidatorBlockExecutor, BlockOrPayload,
-        EngineValidatorBlockExecutor, ExecuteBlockCtx,
+        EngineValidatorBlockExecutor, ExecuteBlockCtx, ExecuteBlockResult,
     },
     precompile_cache::{CachedPrecompile, CachedPrecompileMetrics},
     ExecutionEnv, PayloadHandle,
@@ -138,7 +138,6 @@ impl BbBlockExecutor {
     ///
     /// Consumes transactions from the handle's iterator, splitting them across
     /// segment boundaries defined in the execution plan.
-    #[expect(clippy::type_complexity)]
     fn execute_block_multiseg<Evm, S, Err, Tx, T>(
         &mut self,
         ctx: &mut ExecuteBlockCtx<'_, Evm>,
@@ -147,14 +146,7 @@ impl BbBlockExecutor {
         input: &BlockOrPayload<T>,
         handle: &mut PayloadHandle<Tx, Err, reth_ethereum_primitives::Receipt>,
         plan: &BlockExecutionPlan,
-    ) -> Result<
-        (
-            BlockExecutionOutput<reth_ethereum_primitives::Receipt>,
-            Vec<Address>,
-            tokio::sync::oneshot::Receiver<(B256, Bloom)>,
-        ),
-        InsertBlockErrorKind,
-    >
+    ) -> ExecuteBlockResult<reth_ethereum_primitives::Receipt>
     where
         Evm: ConfigureEvm<Primitives = EthPrimitives>
             + ConfigureEngineEvm<ExecutionData, Primitives = EthPrimitives>
@@ -374,14 +366,7 @@ where
         env: ExecutionEnv<Evm>,
         input: &BlockOrPayload<T>,
         handle: &mut PayloadHandle<Tx, Err, reth_ethereum_primitives::Receipt>,
-    ) -> Result<
-        (
-            BlockExecutionOutput<reth_ethereum_primitives::Receipt>,
-            Vec<Address>,
-            tokio::sync::oneshot::Receiver<(B256, Bloom)>,
-        ),
-        InsertBlockErrorKind,
-    >
+    ) -> ExecuteBlockResult<reth_ethereum_primitives::Receipt>
     where
         S: StateProvider + Send,
         Tx: ExecutableTxFor<Evm>,

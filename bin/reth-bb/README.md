@@ -2,7 +2,7 @@
 
 A modified reth node for benchmarking **big block** execution — payloads that merge transactions from multiple consecutive blocks into a single block to simulate high-gas workloads.
 
-> **Not for production use.** reth-bb disables some concensus-related validations to allow artificially large blocks. It is intended solely for performance benchmarking.
+> **Not for production use.** reth-bb disables some consensus-related validations to allow artificially large blocks. It is intended solely for performance benchmarking.
 
 ## How it works
 
