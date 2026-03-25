@@ -47,6 +47,16 @@ const DEFAULT_MAX_INVALID_HEADER_CACHE_LENGTH: u32 = 256;
 const DEFAULT_MAX_EXECUTE_BLOCK_BATCH_SIZE: usize = 4;
 const DEFAULT_CROSS_BLOCK_CACHE_SIZE: usize = default_cross_block_cache_size();
 
+const fn assert_backpressure_threshold_invariant(
+    persistence_threshold: u64,
+    persistence_backpressure_threshold: u64,
+) {
+    debug_assert!(
+        persistence_backpressure_threshold > persistence_threshold,
+        "persistence_backpressure_threshold must be greater than persistence_threshold",
+    );
+}
+
 const fn default_cross_block_cache_size() -> usize {
     if cfg!(test) {
         1024 * 1024 // 1 MB in tests
@@ -167,6 +177,10 @@ pub struct TreeConfig {
 
 impl Default for TreeConfig {
     fn default() -> Self {
+        assert_backpressure_threshold_invariant(
+            DEFAULT_PERSISTENCE_THRESHOLD,
+            DEFAULT_PERSISTENCE_BACKPRESSURE_THRESHOLD,
+        );
         Self {
             persistence_threshold: DEFAULT_PERSISTENCE_THRESHOLD,
             memory_block_buffer_target: DEFAULT_MEMORY_BLOCK_BUFFER_TARGET,
@@ -232,6 +246,10 @@ impl TreeConfig {
         state_root_task_timeout: Option<Duration>,
         share_execution_cache_with_payload_builder: bool,
     ) -> Self {
+        assert_backpressure_threshold_invariant(
+            persistence_threshold,
+            persistence_backpressure_threshold,
+        );
         Self {
             persistence_threshold,
             memory_block_buffer_target,
@@ -376,6 +394,10 @@ impl TreeConfig {
     /// Setter for persistence threshold.
     pub const fn with_persistence_threshold(mut self, persistence_threshold: u64) -> Self {
         self.persistence_threshold = persistence_threshold;
+        assert_backpressure_threshold_invariant(
+            self.persistence_threshold,
+            self.persistence_backpressure_threshold,
+        );
         self
     }
 
@@ -394,6 +416,10 @@ impl TreeConfig {
         persistence_backpressure_threshold: u64,
     ) -> Self {
         self.persistence_backpressure_threshold = persistence_backpressure_threshold;
+        assert_backpressure_threshold_invariant(
+            self.persistence_threshold,
+            self.persistence_backpressure_threshold,
+        );
         self
     }
 
@@ -612,5 +638,16 @@ impl TreeConfig {
     pub const fn with_proof_jitter(mut self, proof_jitter: Option<Duration>) -> Self {
         self.proof_jitter = proof_jitter;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TreeConfig;
+
+    #[test]
+    #[should_panic(expected = "persistence_backpressure_threshold must be greater than persistence_threshold")]
+    fn rejects_backpressure_threshold_at_or_below_persistence_threshold() {
+        let _ = TreeConfig::default().with_persistence_threshold(4).with_persistence_backpressure_threshold(4);
     }
 }

@@ -286,9 +286,9 @@ impl TestHarness {
         self
     }
 
-    fn process_next_buffered_beacon_message(&mut self) {
-        let processed = self.tree.try_process_buffered_beacon_message().unwrap();
-        assert!(processed.is_some(), "expected a buffered beacon message to be processed");
+    fn process_next_buffered_message(&mut self) {
+        let processed = self.tree.try_process_buffered_engine_message().unwrap();
+        assert!(processed.is_some(), "expected a buffered message to be processed");
     }
 
     async fn fcu_to(&mut self, block_hash: B256, fcu_status: impl Into<ForkchoiceStatus>) {
@@ -314,7 +314,7 @@ impl TestHarness {
                 .into(),
             ))
             .unwrap();
-        self.process_next_buffered_beacon_message();
+        self.process_next_buffered_message();
 
         let response = rx.await.unwrap().unwrap().await.unwrap();
         match fcu_status.into() {
@@ -614,7 +614,7 @@ async fn test_engine_request_during_backfill() {
             .into(),
         ))
         .unwrap();
-    test_harness.process_next_buffered_beacon_message();
+    test_harness.process_next_buffered_message();
 
     let resp = rx.await.unwrap().unwrap().await.unwrap();
     assert!(resp.payload_status.is_syncing());
@@ -693,7 +693,7 @@ async fn test_holesky_payload() {
             .into(),
         ))
         .unwrap();
-    test_harness.process_next_buffered_beacon_message();
+    test_harness.process_next_buffered_message();
 
     let resp = rx.await.unwrap().unwrap();
     assert!(resp.is_syncing());
@@ -702,7 +702,11 @@ async fn test_holesky_payload() {
 #[test]
 fn test_buffered_beacon_message_processes_below_backpressure_threshold() {
     let mut test_harness = TestHarness::new(MAINNET.clone());
-    test_harness.tree.config = test_harness.tree.config.with_persistence_backpressure_threshold(1);
+    test_harness.tree.config = test_harness
+        .tree
+        .config
+        .with_persistence_threshold(0)
+        .with_persistence_backpressure_threshold(1);
 
     let (tx, mut rx) = oneshot::channel();
     let _ = test_harness
@@ -721,19 +725,23 @@ fn test_buffered_beacon_message_processes_below_backpressure_threshold() {
         ))
         .unwrap();
 
-    assert_eq!(test_harness.tree.buffered_beacon_messages.len(), 1);
+    assert_eq!(test_harness.tree.buffered_engine_messages.len(), 1);
     assert!(!test_harness.tree.should_backpressure());
 
-    test_harness.process_next_buffered_beacon_message();
+    test_harness.process_next_buffered_message();
     assert!(rx.try_recv().is_ok(), "expected buffered response after processing");
-    assert!(test_harness.tree.buffered_beacon_messages.is_empty());
+    assert!(test_harness.tree.buffered_engine_messages.is_empty());
 }
 
 #[test]
 fn test_buffered_beacon_message_stays_buffered_while_backpressured() {
     let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
     let mut test_harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks.clone());
-    test_harness.tree.config = test_harness.tree.config.with_persistence_backpressure_threshold(1);
+    test_harness.tree.config = test_harness
+        .tree
+        .config
+        .with_persistence_threshold(0)
+        .with_persistence_backpressure_threshold(1);
 
     let (_persist_tx, persist_rx) = crossbeam_channel::bounded(1);
     test_harness
@@ -759,15 +767,19 @@ fn test_buffered_beacon_message_stays_buffered_while_backpressured() {
         .unwrap();
 
     assert!(test_harness.tree.should_backpressure());
-    assert!(test_harness.tree.try_process_buffered_beacon_message().unwrap().is_none());
-    assert_eq!(test_harness.tree.buffered_beacon_messages.len(), 1);
+    assert!(test_harness.tree.try_process_buffered_engine_message().unwrap().is_none());
+    assert_eq!(test_harness.tree.buffered_engine_messages.len(), 1);
 }
 
 #[test]
 fn test_backpressure_waits_for_persistence_before_reading_incoming() {
     let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
     let mut test_harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks.clone());
-    test_harness.tree.config = test_harness.tree.config.with_persistence_backpressure_threshold(1);
+    test_harness.tree.config = test_harness
+        .tree
+        .config
+        .with_persistence_threshold(0)
+        .with_persistence_backpressure_threshold(1);
 
     let (persist_tx, persist_rx) = crossbeam_channel::bounded(1);
     let persisted = blocks.last().unwrap().recovered_block().num_hash();
@@ -802,26 +814,35 @@ fn test_backpressure_waits_for_persistence_before_reading_incoming() {
             .unwrap();
     });
 
-    let event = test_harness.tree.wait_for_backpressure_event();
+    let event = test_harness.tree.wait_for_backpressure_event().unwrap();
     assert!(matches!(event, super::LoopEvent::PersistenceComplete { .. }));
+    assert_eq!(test_harness.tree.buffered_engine_messages.len(), 2);
 
-    let event = test_harness.tree.wait_for_event();
-    assert!(matches!(event, super::LoopEvent::EngineMessage(FromEngine::DownloadedBlocks(_))));
+    let super::LoopEvent::PersistenceComplete { result, start_time } = event else {
+        unreachable!()
+    };
+    test_harness.tree.on_persistence_complete(result, start_time).unwrap();
+
+    test_harness.process_next_buffered_message();
+    assert!(test_harness.tree.buffered_engine_messages.len() == 1);
+    test_harness.process_next_buffered_message();
+    assert!(test_harness.tree.buffered_engine_messages.is_empty());
 }
 
 #[tokio::test]
-async fn test_fcu_with_payload_attributes_bypasses_backpressure_queue() {
+async fn test_fcu_with_payload_attributes_is_buffered_like_other_messages() {
     let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..2).collect();
     let mut test_harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks);
     test_harness.tree.config = test_harness
         .tree
         .config
         .clone()
-        .with_persistence_backpressure_threshold(0)
+        .with_persistence_threshold(0)
+        .with_persistence_backpressure_threshold(2)
         .with_always_process_payload_attributes_on_canonical_head(true);
 
     let head = test_harness.tree.canonical_in_memory_state.get_canonical_head();
-    let (tx, rx) = oneshot::channel();
+    let (tx, mut rx) = oneshot::channel();
     let _ = test_harness
         .tree
         .on_engine_message(FromEngine::Request(
@@ -844,9 +865,55 @@ async fn test_fcu_with_payload_attributes_bypasses_backpressure_queue() {
         ))
         .unwrap();
 
-    assert!(test_harness.tree.buffered_beacon_messages.is_empty());
+    assert_eq!(test_harness.tree.buffered_engine_messages.len(), 1);
+    assert!(rx.try_recv().is_err());
+    test_harness.process_next_buffered_message();
     let response = rx.await.unwrap().unwrap();
     assert_eq!(response.forkchoice_status(), ForkchoiceStatus::Valid);
+}
+
+#[test]
+fn test_backpressure_handler_enqueues_attrs_fcu() {
+    let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..2).collect();
+    let mut test_harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks);
+    test_harness.tree.config = test_harness
+        .tree
+        .config
+        .clone()
+        .with_persistence_threshold(0)
+        .with_persistence_backpressure_threshold(1)
+        .with_always_process_payload_attributes_on_canonical_head(true);
+
+    let (_persist_tx, persist_rx) = crossbeam_channel::bounded(1);
+    let persisted = test_harness.tree.state.tree_state.current_canonical_head;
+    test_harness.tree.persistence_state.start_save(persisted, persist_rx);
+
+    let head = test_harness.tree.canonical_in_memory_state.get_canonical_head();
+    let (tx, mut rx) = oneshot::channel();
+    test_harness
+        .tree
+        .handle_backpressure_message(FromEngine::Request(
+            BeaconEngineMessage::ForkchoiceUpdated {
+                state: ForkchoiceState {
+                    head_block_hash: head.hash(),
+                    safe_block_hash: B256::ZERO,
+                    finalized_block_hash: B256::ZERO,
+                },
+                payload_attrs: Some(alloy_rpc_types_engine::PayloadAttributes {
+                    timestamp: head.timestamp().saturating_add(1),
+                    prev_randao: B256::ZERO,
+                    suggested_fee_recipient: Address::ZERO,
+                    withdrawals: None,
+                    parent_beacon_block_root: None,
+                }),
+                tx,
+            }
+            .into(),
+        ))
+        .unwrap();
+
+    assert_eq!(test_harness.tree.buffered_engine_messages.len(), 1);
+    assert!(rx.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -878,7 +945,7 @@ async fn test_reth_new_payload_reports_backpressure_wait() {
         .unwrap();
 
     std::thread::sleep(Duration::from_millis(10));
-    test_harness.process_next_buffered_beacon_message();
+    test_harness.process_next_buffered_message();
 
     let (_, timings) = rx.await.unwrap().unwrap();
     assert!(timings.backpressure_wait.is_some());
@@ -1288,7 +1355,7 @@ async fn test_fcu_with_canonical_ancestor_updates_latest_block() {
             .into(),
         ))
         .unwrap();
-    test_harness.process_next_buffered_beacon_message();
+    test_harness.process_next_buffered_message();
 
     // Verify FCU succeeds
     let response = rx.await.unwrap().unwrap().await.unwrap();

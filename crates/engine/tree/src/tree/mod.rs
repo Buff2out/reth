@@ -262,6 +262,12 @@ struct QueuedBeaconMessage<T: PayloadTypes> {
     message: BeaconEngineMessage<T>,
 }
 
+#[derive(Debug)]
+enum BufferedEngineMessage<T: PayloadTypes, N: NodePrimitives> {
+    Beacon(QueuedBeaconMessage<T>),
+    Other(FromEngine<EngineApiRequest<T, N>, N::Block>),
+}
+
 /// The engine API tree handler implementation.
 ///
 /// This type is responsible for processing engine API requests, maintaining the canonical state and
@@ -288,8 +294,8 @@ where
     incoming_tx: Sender<FromEngine<EngineApiRequest<T, N>, N::Block>>,
     /// Incoming engine API requests.
     incoming: Receiver<FromEngine<EngineApiRequest<T, N>, N::Block>>,
-    /// Buffered beacon messages waiting to be processed once persistence catches up.
-    buffered_beacon_messages: VecDeque<QueuedBeaconMessage<T>>,
+    /// Buffered engine messages waiting to be processed once persistence catches up.
+    buffered_engine_messages: VecDeque<BufferedEngineMessage<T, N>>,
     /// Outgoing events that are emitted to the handler.
     outgoing: UnboundedSender<EngineApiEvent<N>>,
     /// Channels to the persistence layer.
@@ -335,7 +341,7 @@ where
             .field("payload_validator", &self.payload_validator)
             .field("state", &self.state)
             .field("incoming_tx", &self.incoming_tx)
-            .field("buffered_beacon_messages", &self.buffered_beacon_messages.len())
+            .field("buffered_engine_messages", &self.buffered_engine_messages.len())
             .field("persistence", &self.persistence)
             .field("persistence_state", &self.persistence_state)
             .field("backfill_sync_state", &self.backfill_sync_state)
@@ -396,7 +402,7 @@ where
             consensus,
             payload_validator,
             incoming,
-            buffered_beacon_messages: VecDeque::new(),
+            buffered_engine_messages: VecDeque::new(),
             outgoing,
             persistence,
             persistence_state,
@@ -489,12 +495,21 @@ where
     }
 
     fn update_backpressure_buffer_len_metric(&self) {
-        self.metrics.engine.backpressure_buffer_len.set(self.buffered_beacon_messages.len() as f64);
+        self.metrics.engine.backpressure_buffer_len.set(self.buffered_engine_messages.len() as f64);
     }
 
     fn enqueue_beacon_message(&mut self, message: BeaconEngineMessage<T>) {
-        self.buffered_beacon_messages
-            .push_back(QueuedBeaconMessage { enqueued_at: Instant::now(), message });
+        self.buffered_engine_messages.push_back(BufferedEngineMessage::Beacon(
+            QueuedBeaconMessage { enqueued_at: Instant::now(), message },
+        ));
+        self.update_backpressure_buffer_len_metric();
+    }
+
+    fn enqueue_buffered_engine_message(
+        &mut self,
+        message: FromEngine<EngineApiRequest<T, N>, N::Block>,
+    ) {
+        self.buffered_engine_messages.push_back(BufferedEngineMessage::Other(message));
         self.update_backpressure_buffer_len_metric();
     }
 
@@ -506,33 +521,53 @@ where
     }
 
     fn should_backpressure(&self) -> bool {
-        !self.buffered_beacon_messages.is_empty()
+        !self.buffered_engine_messages.is_empty()
             && self.persistence_gap() >= self.config.persistence_backpressure_threshold()
     }
 
-    fn try_process_buffered_beacon_message(
+    fn try_process_buffered_engine_message(
         &mut self,
     ) -> Result<Option<ops::ControlFlow<()>>, InsertBlockFatalError> {
         if self.should_backpressure() {
             return Ok(None);
         }
 
-        let Some(queued) = self.buffered_beacon_messages.pop_front() else {
+        let Some(queued) = self.buffered_engine_messages.pop_front() else {
             return Ok(None);
         };
         self.update_backpressure_buffer_len_metric();
 
-        let wait = queued.enqueued_at.elapsed();
-        match &queued.message {
-            BeaconEngineMessage::NewPayload { .. } | BeaconEngineMessage::RethNewPayload { .. } => {
-                self.metrics.engine.new_payload_backpressure_wait_seconds.record(wait);
+        match queued {
+            BufferedEngineMessage::Beacon(queued) => {
+                let wait = queued.enqueued_at.elapsed();
+                match &queued.message {
+                    BeaconEngineMessage::NewPayload { .. } |
+                    BeaconEngineMessage::RethNewPayload { .. } => {
+                        self.metrics.engine.new_payload_backpressure_wait_seconds.record(wait);
+                    }
+                    BeaconEngineMessage::ForkchoiceUpdated { .. } => {
+                        self.metrics.engine.fcu_backpressure_wait_seconds.record(wait);
+                    }
+                }
+
+                self.process_beacon_message(queued.message, Some(wait)).map(Some)
             }
-            BeaconEngineMessage::ForkchoiceUpdated { .. } => {
-                self.metrics.engine.fcu_backpressure_wait_seconds.record(wait);
+            BufferedEngineMessage::Other(message) => self.on_engine_message(message).map(Some),
+        }
+    }
+
+    fn handle_backpressure_message(
+        &mut self,
+        message: FromEngine<EngineApiRequest<T, N>, N::Block>,
+    ) -> Result<(), InsertBlockFatalError> {
+        match message {
+            FromEngine::Request(EngineApiRequest::Beacon(request)) => {
+                self.enqueue_beacon_message(request);
             }
+            other => self.enqueue_buffered_engine_message(other),
         }
 
-        self.process_beacon_message(queued.message, Some(wait)).map(Some)
+        Ok(())
     }
 
     /// Run the engine API handler.
@@ -555,7 +590,7 @@ where
                 }
             }
 
-            match self.try_process_buffered_beacon_message() {
+            match self.try_process_buffered_engine_message() {
                 Ok(Some(ops::ControlFlow::Break(()))) => return,
                 Ok(Some(ops::ControlFlow::Continue(()))) => {
                     if let Err(err) = self.advance_persistence() {
@@ -576,7 +611,13 @@ where
                     error!(target: "engine::tree", %err, "Advancing persistence failed");
                     return
                 }
-                self.wait_for_backpressure_event()
+                match self.wait_for_backpressure_event() {
+                    Ok(event) => event,
+                    Err(fatal) => {
+                        error!(target: "engine::tree", %fatal, "insert block fatal error");
+                        return;
+                    }
+                }
             } else {
                 self.wait_for_event()
             };
@@ -616,16 +657,28 @@ where
         }
     }
 
-    fn wait_for_backpressure_event(&mut self) -> LoopEvent<T, N> {
+    fn wait_for_backpressure_event(&mut self) -> Result<LoopEvent<T, N>, InsertBlockFatalError> {
         let maybe_persistence = self.persistence_state.rx.take();
 
         if let Some((persistence_rx, start_time, _action)) = maybe_persistence {
-            match persistence_rx.recv() {
-                Ok(result) => LoopEvent::PersistenceComplete { result, start_time },
-                Err(_) => LoopEvent::Disconnected,
+            loop {
+                crossbeam_channel::select_biased! {
+                    recv(persistence_rx) -> result => {
+                        return Ok(match result {
+                            Ok(result) => LoopEvent::PersistenceComplete { result, start_time },
+                            Err(_) => LoopEvent::Disconnected,
+                        })
+                    }
+                    recv(self.incoming) -> msg => {
+                        match msg {
+                            Ok(message) => self.handle_backpressure_message(message)?,
+                            Err(_) => return Ok(LoopEvent::Disconnected),
+                        }
+                    }
+                }
             }
         } else {
-            self.wait_for_event()
+            Ok(self.wait_for_event())
         }
     }
 
@@ -1600,13 +1653,6 @@ where
                         ));
                     }
                     EngineApiRequest::Beacon(request) => {
-                        if matches!(
-                            &request,
-                            BeaconEngineMessage::ForkchoiceUpdated { payload_attrs: Some(_), .. }
-                        ) {
-                            return self.process_beacon_message(request, None);
-                        }
-
                         self.enqueue_beacon_message(request);
                     }
                 }
