@@ -84,7 +84,7 @@ impl KeyPools {
             .collect();
 
         // Determine which 2-nibble prefixes to target.
-        let prefix_filter = choose_prefix_filter(subtrie_mode, live_state, rng);
+        let prefix_filter = choose_prefix_filter(subtrie_mode, &hot, &pruned, &cold, live_state, rng);
 
         let total_weight =
             weights.hot as u32 + weights.recent_pruned as u32 + weights.cold as u32 + weights.new as u32;
@@ -151,11 +151,18 @@ impl PoolWeights {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PrefixFilter {
+    prefixes: Vec<u8>,
+    /// If set, do not relax prefix constraints when no matching pool key exists.
+    strict: bool,
+}
+
 /// Pick a key from a pool that matches the prefix filter and hasn't been selected yet.
 fn pick_from_pool(
     pool: &[B256],
     already_selected: &BTreeSet<B256>,
-    prefix_filter: &Option<Vec<[u8; 1]>>,
+    prefix_filter: &Option<PrefixFilter>,
     rng: &mut StdRng,
 ) -> Option<B256> {
     if pool.is_empty() {
@@ -169,10 +176,7 @@ fn pick_from_pool(
             continue;
         }
         if let Some(prefixes) = prefix_filter {
-            let first_byte = candidate[0] >> 4; // First nibble.
-            let second_nibble = candidate[0] & 0x0F;
-            let prefix_byte = (first_byte << 4) | second_nibble;
-            if !prefixes.iter().any(|p| p[0] == prefix_byte) {
+            if !prefixes.prefixes.contains(&candidate[0]) {
                 continue;
             }
         }
@@ -185,13 +189,13 @@ fn pick_from_pool(
         .filter(|k| {
             !already_selected.contains(*k)
                 && prefix_filter.as_ref().is_none_or(|prefixes| {
-                    prefixes.iter().any(|p| p[0] == k[0])
+                    prefixes.prefixes.contains(&k[0])
                 })
         })
         .copied()
         .collect();
 
-    if candidates.is_empty() {
+    if candidates.is_empty() && !prefix_filter.as_ref().is_some_and(|f| f.strict) {
         // Relax prefix filter.
         candidates = pool.iter().filter(|k| !already_selected.contains(*k)).copied().collect();
     }
@@ -205,12 +209,12 @@ fn pick_from_pool(
 }
 
 /// Generate a new random key, optionally constrained to a prefix.
-fn generate_key_with_prefix(prefix_filter: &Option<Vec<[u8; 1]>>, rng: &mut StdRng) -> B256 {
+fn generate_key_with_prefix(prefix_filter: &Option<PrefixFilter>, rng: &mut StdRng) -> B256 {
     let mut key = random_b256(rng);
     if let Some(prefixes) = prefix_filter {
-        if !prefixes.is_empty() {
-            let chosen = prefixes[rng.random_range(0..prefixes.len())];
-            key[0] = chosen[0];
+        if !prefixes.prefixes.is_empty() {
+            let chosen = prefixes.prefixes[rng.random_range(0..prefixes.prefixes.len())];
+            key[0] = chosen;
         }
     }
     key
@@ -219,9 +223,12 @@ fn generate_key_with_prefix(prefix_filter: &Option<Vec<[u8; 1]>>, rng: &mut StdR
 /// Choose which 2-nibble prefixes (first byte of B256) to target based on SubtrieMode.
 fn choose_prefix_filter(
     mode: SubtrieMode,
+    hot: &[B256],
+    pruned: &[B256],
+    cold: &[B256],
     live_state: &BTreeMap<B256, alloy_primitives::U256>,
     rng: &mut StdRng,
-) -> Option<Vec<[u8; 1]>> {
+) -> Option<PrefixFilter> {
     if live_state.is_empty() {
         return None;
     }
@@ -234,15 +241,35 @@ fn choose_prefix_filter(
     occupied.shuffle(rng);
 
     match mode {
-        SubtrieMode::SinglePrefix => Some(vec![[occupied[0]]]),
+        SubtrieMode::SinglePrefix => Some(PrefixFilter { prefixes: vec![occupied[0]], strict: false }),
+        SubtrieMode::StickyPrefix => {
+            let sticky_prefix = dominant_prefix(pruned)
+                .or_else(|| dominant_prefix(hot))
+                .or_else(|| dominant_prefix(cold))
+                .unwrap_or(occupied[0]);
+            Some(PrefixFilter { prefixes: vec![sticky_prefix], strict: true })
+        }
         SubtrieMode::TwoPrefixes => {
             let n = occupied.len().min(2);
-            Some(occupied[..n].iter().map(|b| [*b]).collect())
+            Some(PrefixFilter { prefixes: occupied[..n].to_vec(), strict: false })
         }
         SubtrieMode::ManyPrefixes => {
             let n = occupied.len().min(rng.random_range(4..=8).min(occupied.len()));
-            Some(occupied[..n].iter().map(|b| [*b]).collect())
+            Some(PrefixFilter { prefixes: occupied[..n].to_vec(), strict: false })
         }
         SubtrieMode::Scattered => None,
     }
+}
+
+fn dominant_prefix(keys: &[B256]) -> Option<u8> {
+    if keys.is_empty() {
+        return None;
+    }
+
+    let mut counts = BTreeMap::<u8, usize>::new();
+    for key in keys {
+        *counts.entry(key[0]).or_default() += 1;
+    }
+
+    counts.into_iter().max_by_key(|(_, count)| *count).map(|(prefix, _)| prefix)
 }

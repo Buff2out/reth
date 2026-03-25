@@ -9,12 +9,12 @@ fn random_b256(rng: &mut StdRng) -> B256 {
     B256::from(rng.random::<[u8; 32]>())
 }
 
-use crate::input::{BlockSpec, InitialLayout, InitialStateSpec};
+use crate::input::{BlockSpec, InitialLayout, InitialSizeMode, InitialStateSpec};
 use crate::pools::{KeyPools, PoolWeights};
 
 /// Build the initial storage map from the fuzz input spec.
 pub fn build_initial_storage(spec: &InitialStateSpec) -> BTreeMap<B256, U256> {
-    let count = 500 + (spec.key_count % 1501) as usize;
+    let count = normalize_initial_count(spec);
     let mut key_rng = StdRng::seed_from_u64(spec.key_seed);
     let mut val_rng = StdRng::seed_from_u64(spec.value_seed);
 
@@ -55,6 +55,23 @@ pub fn build_initial_storage(spec: &InitialStateSpec) -> BTreeMap<B256, U256> {
     }
 
     storage
+}
+
+fn normalize_initial_count(spec: &InitialStateSpec) -> usize {
+    let large = 500 + (spec.key_count % 1501) as usize;
+    let small = 8 + (spec.key_count % 57) as usize;
+
+    match spec.size_mode {
+        InitialSizeMode::Large => large,
+        InitialSizeMode::Small => small,
+        InitialSizeMode::Mixed => {
+            if spec.key_seed & 1 == 0 {
+                small
+            } else {
+                large
+            }
+        }
+    }
 }
 
 /// A realized block: the leaf updates to apply and the model changeset.

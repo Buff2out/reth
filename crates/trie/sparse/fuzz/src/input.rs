@@ -1,7 +1,7 @@
 use arbitrary::Arbitrary;
 
 /// Top-level fuzz input. Kept small and seed-driven so libFuzzer can mutate
-/// effectively — the actual 500–2000 key initial state is generated at runtime.
+/// effectively — the actual initial state size is generated at runtime.
 #[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzInput {
     /// Controls parallelism thresholds for both implementations.
@@ -33,9 +33,22 @@ pub enum ThresholdProfile {
 pub struct InitialStateSpec {
     pub key_seed: u64,
     pub value_seed: u64,
-    /// Normalized to 500..=2000.
+    /// Raw count; normalized according to [`InitialSizeMode`].
     pub key_count: u16,
+    /// Controls whether we start from a large or small trie.
+    pub size_mode: InitialSizeMode,
     pub layout: InitialLayout,
+}
+
+/// Controls the scale of the initial generated state.
+#[derive(Debug, Clone, Copy, Arbitrary)]
+pub enum InitialSizeMode {
+    /// Production-like state size.
+    Large,
+    /// Small state to maximize structural churn and branch collapse activity.
+    Small,
+    /// Per-input mix of small and large states.
+    Mixed,
 }
 
 /// Key distribution for the initial state.
@@ -70,8 +83,21 @@ pub struct BlockSpec {
     /// Seed for key selection and value generation within this block.
     pub key_seed: u64,
     pub value_seed: u64,
-    /// Whether to skip pruning this round.
-    pub skip_prune: bool,
+    /// Raw op count — normalized to 3..=10.
+    pub op_count: u8,
+    /// Operation schedule for this round. Cycled if shorter than `op_count`.
+    pub ops: Vec<RoundOp>,
+}
+
+/// Operations a round can execute. These are intentionally reorderable.
+#[derive(Debug, Clone, Copy, Arbitrary)]
+pub enum RoundOp {
+    /// Apply pending updates and request/reveal proofs as needed.
+    ApplyUpdates,
+    /// Prune currently-revealed portions of the trie.
+    Prune,
+    /// Compute roots and compare both impls with the oracle at this point in time.
+    CheckpointRoot,
 }
 
 /// Controls how keys are distributed across subtries within a block.
@@ -79,6 +105,8 @@ pub struct BlockSpec {
 pub enum SubtrieMode {
     /// All keys under one 2-nibble prefix — arena sees taken.len()==1.
     SinglePrefix,
+    /// All keys under one strict 2-nibble prefix (no relaxed fallback) to stress one lower subtrie.
+    StickyPrefix,
     /// Keys split across 2 prefixes — arena can hit real rayon.
     TwoPrefixes,
     /// Keys spread across 4+ prefixes.

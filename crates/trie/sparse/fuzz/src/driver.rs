@@ -6,7 +6,7 @@ use reth_trie_sparse::{
     ParallelismThresholds, SparseTrie,
 };
 
-use crate::input::{FuzzInput, ThresholdProfile};
+use crate::input::{BlockSpec, FuzzInput, RoundOp, ThresholdProfile};
 use crate::model::{
     apply_changeset_to_live_state, build_initial_storage, choose_retained_keys,
     collect_proof_requests, merge_requests, realize_block,
@@ -15,6 +15,9 @@ use crate::pools::KeyPools;
 
 /// Maximum number of reveal-update retry iterations before we give up.
 const MAX_RETRY_ITERS: usize = 64;
+/// Per-round operation count bounds.
+const MIN_ROUND_OPS: usize = 3;
+const MAX_ROUND_OPS: usize = 10;
 
 /// Main fuzzer entry point. Drives both SparseTrie implementations through
 /// the same multi-block lifecycle and asserts they agree on roots.
@@ -58,85 +61,172 @@ pub fn run(input: FuzzInput) {
         // Cycle through the block specs if fewer than round_count.
         let spec = &input.rounds[round_idx % input.rounds.len()];
 
-        // 3. Build one production-like small block.
-        let block = realize_block(spec, &live_state, &mut pools);
+        // Build one production-like small block.
+        let crate::model::RealizedBlock { leaf_updates, changeset, touched_keys } =
+            realize_block(spec, &live_state, &mut pools);
+        let mut pending_arena = leaf_updates.clone();
+        let mut pending_map = leaf_updates;
+        let mut pending_changeset = Some(changeset);
 
-        let mut pending_arena = block.leaf_updates.clone();
-        let mut pending_map = block.leaf_updates;
+        let mut updates_applied = false;
+        let mut pruned_this_round = false;
 
-        // 4. Joint reveal-update loop against ONE proof source.
-        for _ in 0..MAX_RETRY_ITERS {
-            let arena_requests = collect_proof_requests(&mut arena, &mut pending_arena);
-            let map_requests = collect_proof_requests(&mut map_trie, &mut pending_map);
+        let ops = materialize_round_ops(spec);
+        for (op_idx, op) in ops.into_iter().enumerate() {
+            match op {
+                RoundOp::ApplyUpdates => {
+                    apply_pending_updates(
+                        &mut arena,
+                        &mut map_trie,
+                        &mut harness,
+                        &mut pending_arena,
+                        &mut pending_map,
+                        round_idx,
+                        op_idx,
+                    );
 
-            let mut targets = merge_requests(arena_requests, map_requests);
+                    if !updates_applied {
+                        let changeset = pending_changeset
+                            .take()
+                            .expect("changeset should be available before first apply");
+                        apply_changeset_to_live_state(&mut live_state, &changeset);
+                        harness.apply_changeset(changeset);
+                        updates_applied = true;
+                    }
+                }
+                RoundOp::Prune => {
+                    let mut prune_rng = StdRng::seed_from_u64(
+                        spec.key_seed
+                            .wrapping_add((round_idx as u64) << 16)
+                            .wrapping_add(op_idx as u64),
+                    );
+                    let retained = choose_retained_keys(
+                        spec,
+                        &touched_keys,
+                        &live_state,
+                        &mut prune_rng,
+                    );
 
-            if targets.is_empty() {
-                break;
+                    let mut retained_paths: Vec<Nibbles> =
+                        retained.iter().map(|k| Nibbles::unpack(*k)).collect();
+                    retained_paths.sort_unstable();
+                    retained_paths.dedup();
+
+                    arena.prune(&retained_paths);
+                    map_trie.prune(&retained_paths);
+
+                    pools.observe_prune(&touched_keys, &retained, &live_state);
+                    pruned_this_round = true;
+                }
+                RoundOp::CheckpointRoot => {
+                    checkpoint_roots(&mut arena, &mut map_trie, &harness, round_idx, Some(op_idx));
+                }
             }
-
-            let (mut proof_nodes, _) = harness.proof_v2(&mut targets);
-
-            // reveal_nodes mutates the slice, so clone for the second implementation.
-            let mut proof_nodes_for_map = proof_nodes.clone();
-
-            arena.reveal_nodes(&mut proof_nodes).expect("arena reveal_nodes should succeed");
-            map_trie
-                .reveal_nodes(&mut proof_nodes_for_map)
-                .expect("map reveal_nodes should succeed");
         }
 
-        assert!(pending_arena.is_empty(), "arena has pending updates after retry budget (round {round_idx})");
-        assert!(pending_map.is_empty(), "map has pending updates after retry budget (round {round_idx})");
-
-        // 5. Roots must match after block execution.
-        let arena_root = arena.root();
-        let map_root = map_trie.root();
-        assert_eq!(
-            arena_root, map_root,
-            "impl divergence at round {round_idx}: arena={arena_root} map={map_root}"
-        );
-
-        // 6. Advance oracle model.
-        apply_changeset_to_live_state(&mut live_state, &block.changeset);
-        harness.apply_changeset(block.changeset);
-        let expected_root = harness.original_root();
-
-        assert_eq!(
-            arena_root, expected_root,
-            "oracle mismatch at round {round_idx}: arena={arena_root} expected={expected_root}"
-        );
-
-        // 7. Prune (unless this round skips it).
-        if !spec.skip_prune {
-            let mut prune_rng = StdRng::seed_from_u64(spec.key_seed.wrapping_add(round_idx as u64));
-            let retained = choose_retained_keys(spec, &block.touched_keys, &live_state, &mut prune_rng);
-
-            let mut retained_paths: Vec<Nibbles> =
-                retained.iter().map(|k| Nibbles::unpack(*k)).collect();
-            retained_paths.sort_unstable();
-            retained_paths.dedup();
-
-            arena.prune(&retained_paths);
-            map_trie.prune(&retained_paths);
-
-            // Root must be unchanged after prune.
-            let arena_root_post = arena.root();
-            let map_root_post = map_trie.root();
-            assert_eq!(
-                arena_root_post, expected_root,
-                "arena root changed after prune at round {round_idx}"
-            );
-            assert_eq!(
-                map_root_post, expected_root,
-                "map root changed after prune at round {round_idx}"
+        // Ensure rounds eventually apply updates even if the op schedule omitted ApplyUpdates.
+        if !updates_applied {
+            apply_pending_updates(
+                &mut arena,
+                &mut map_trie,
+                &mut harness,
+                &mut pending_arena,
+                &mut pending_map,
+                round_idx,
+                usize::MAX,
             );
 
-            pools.observe_prune(&block.touched_keys, &retained, &live_state);
-        } else {
-            pools.observe_no_prune(&block.touched_keys, &live_state);
+            let changeset =
+                pending_changeset.take().expect("changeset should exist when applying at round end");
+            apply_changeset_to_live_state(&mut live_state, &changeset);
+            harness.apply_changeset(changeset);
+            updates_applied = true;
+        }
+
+        // Always checkpoint at end of round to keep strong invariants regardless of op schedule.
+        if updates_applied {
+            checkpoint_roots(&mut arena, &mut map_trie, &harness, round_idx, None);
+        }
+
+        if !pruned_this_round {
+            pools.observe_no_prune(&touched_keys, &live_state);
         }
     }
+}
+
+fn materialize_round_ops(spec: &BlockSpec) -> Vec<RoundOp> {
+    if spec.ops.is_empty() {
+        return vec![
+            RoundOp::ApplyUpdates,
+            RoundOp::CheckpointRoot,
+            RoundOp::Prune,
+            RoundOp::CheckpointRoot,
+        ];
+    }
+
+    let op_count = MIN_ROUND_OPS + (spec.op_count as usize % (MAX_ROUND_OPS - MIN_ROUND_OPS + 1));
+    spec.ops.iter().copied().cycle().take(op_count).collect()
+}
+
+fn apply_pending_updates(
+    arena: &mut ArenaParallelSparseTrie,
+    map_trie: &mut ParallelSparseTrie,
+    harness: &mut TrieTestHarness,
+    pending_arena: &mut alloy_primitives::map::B256Map<reth_trie_sparse::LeafUpdate>,
+    pending_map: &mut alloy_primitives::map::B256Map<reth_trie_sparse::LeafUpdate>,
+    round_idx: usize,
+    op_idx: usize,
+) {
+    for _ in 0..MAX_RETRY_ITERS {
+        let arena_requests = collect_proof_requests(arena, pending_arena);
+        let map_requests = collect_proof_requests(map_trie, pending_map);
+
+        let mut targets = merge_requests(arena_requests, map_requests);
+        if targets.is_empty() {
+            break;
+        }
+
+        let (mut proof_nodes, _) = harness.proof_v2(&mut targets);
+
+        // reveal_nodes mutates the slice, so clone for the second implementation.
+        let mut proof_nodes_for_map = proof_nodes.clone();
+
+        arena.reveal_nodes(&mut proof_nodes).expect("arena reveal_nodes should succeed");
+        map_trie
+            .reveal_nodes(&mut proof_nodes_for_map)
+            .expect("map reveal_nodes should succeed");
+    }
+
+    assert!(
+        pending_arena.is_empty(),
+        "arena has pending updates after retry budget (round {round_idx}, op {op_idx})"
+    );
+    assert!(
+        pending_map.is_empty(),
+        "map has pending updates after retry budget (round {round_idx}, op {op_idx})"
+    );
+}
+
+fn checkpoint_roots(
+    arena: &mut ArenaParallelSparseTrie,
+    map_trie: &mut ParallelSparseTrie,
+    harness: &TrieTestHarness,
+    round_idx: usize,
+    op_idx: Option<usize>,
+) {
+    let arena_root = arena.root();
+    let map_root = map_trie.root();
+    let expected_root = harness.original_root();
+
+    let phase = op_idx.map_or_else(|| "end".to_string(), |idx| format!("op {idx}"));
+    assert_eq!(
+        arena_root, map_root,
+        "impl divergence at round {round_idx} ({phase}): arena={arena_root} map={map_root}"
+    );
+    assert_eq!(
+        arena_root, expected_root,
+        "oracle mismatch at round {round_idx} ({phase}): arena={arena_root} expected={expected_root}"
+    );
 }
 
 /// Convert a threshold profile into concrete thresholds for both implementations.
