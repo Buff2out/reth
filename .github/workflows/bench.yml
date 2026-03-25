@@ -503,6 +503,7 @@ jobs:
       BENCH_OTLP: ${{ needs.reth-bench-ack.outputs.otlp }}
       BENCH_COMMENT_ID: ${{ needs.reth-bench-ack.outputs.comment-id }}
       BENCH_NO_SLACK: ${{ needs.reth-bench-ack.outputs.no-slack }}
+      BENCH_NODE_BIN: ${{ needs.reth-bench-ack.outputs.big-blocks == 'true' && 'reth-bb' || 'reth' }}
       BENCH_METRICS_ADDR: "127.0.0.1:9100"
       BENCH_OTLP_TRACES_ENDPOINT: ${{ needs.reth-bench-ack.outputs.otlp != 'false' && secrets.BENCH_OTLP_TRACES_ENDPOINT || '' }}
       BENCH_OTLP_LOGS_ENDPOINT: ${{ needs.reth-bench-ack.outputs.otlp != 'false' && secrets.BENCH_OTLP_LOGS_ENDPOINT || '' }}
@@ -787,7 +788,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BENCH_REPO: ${{ github.repository }}
-          BENCH_RETH_BINARY: ${{ github.workspace }}/../reth-feature/target/profiling/reth
+          BENCH_RETH_BINARY: ${{ github.workspace }}/../reth-feature/target/profiling/${{ needs.reth-bench-ack.outputs.big-blocks == 'true' && 'reth-bb' || 'reth' }}
         run: .github/scripts/bench-reth-snapshot.sh
 
       # System tuning for reproducible benchmarks
@@ -918,7 +919,7 @@ jobs:
           cat > "$BENCH_LABELS_FILE" <<LABELS
           {"benchmark_run":"baseline-1","run_type":"baseline","git_ref":"${BASELINE_REF}","bench_sha":"${BASELINE_REF}","benchmark_id":"${BENCH_ID}","run_start_epoch":"$(date +%s)","reference_epoch":"${BENCH_REFERENCE_EPOCH}"}
           LABELS
-          taskset -c 0 .github/scripts/bench-reth-run.sh baseline ../reth-baseline/target/profiling/reth "$BENCH_WORK_DIR/baseline-1"
+          taskset -c 0 .github/scripts/bench-reth-run.sh baseline "../reth-baseline/target/profiling/${BENCH_NODE_BIN}" "$BENCH_WORK_DIR/baseline-1"
 
       - name: "Run benchmark: feature (1/2)"
         id: run-feature-1
@@ -929,7 +930,7 @@ jobs:
           cat > "$BENCH_LABELS_FILE" <<LABELS
           {"benchmark_run":"feature-1","run_type":"feature","git_ref":"${FEATURE_REF}","bench_sha":"${FEATURE_REF}","benchmark_id":"${BENCH_ID}","run_start_epoch":"$(date +%s)","reference_epoch":"${BENCH_REFERENCE_EPOCH}"}
           LABELS
-          taskset -c 0 .github/scripts/bench-reth-run.sh feature ../reth-feature/target/profiling/reth "$BENCH_WORK_DIR/feature-1"
+          taskset -c 0 .github/scripts/bench-reth-run.sh feature "../reth-feature/target/profiling/${BENCH_NODE_BIN}" "$BENCH_WORK_DIR/feature-1"
 
       - name: "Run benchmark: feature (2/2)"
         if: env.BENCH_ABBA != 'false'
@@ -941,7 +942,7 @@ jobs:
           cat > "$BENCH_LABELS_FILE" <<LABELS
           {"benchmark_run":"feature-2","run_type":"feature","git_ref":"${FEATURE_REF}","bench_sha":"${FEATURE_REF}","benchmark_id":"${BENCH_ID}","run_start_epoch":"$(date +%s)","reference_epoch":"${BENCH_REFERENCE_EPOCH}"}
           LABELS
-          taskset -c 0 .github/scripts/bench-reth-run.sh feature ../reth-feature/target/profiling/reth "$BENCH_WORK_DIR/feature-2"
+          taskset -c 0 .github/scripts/bench-reth-run.sh feature "../reth-feature/target/profiling/${BENCH_NODE_BIN}" "$BENCH_WORK_DIR/feature-2"
 
       - name: "Run benchmark: baseline (2/2)"
         if: env.BENCH_ABBA != 'false'
@@ -955,7 +956,7 @@ jobs:
           cat > "$BENCH_LABELS_FILE" <<LABELS
           {"benchmark_run":"baseline-2","run_type":"baseline","git_ref":"${BASELINE_REF}","bench_sha":"${BASELINE_REF}","benchmark_id":"${BENCH_ID}","run_start_epoch":"${LAST_RUN_START}","reference_epoch":"${BENCH_REFERENCE_EPOCH}"}
           LABELS
-          taskset -c 0 .github/scripts/bench-reth-run.sh baseline ../reth-baseline/target/profiling/reth "$BENCH_WORK_DIR/baseline-2"
+          taskset -c 0 .github/scripts/bench-reth-run.sh baseline "../reth-baseline/target/profiling/${BENCH_NODE_BIN}" "$BENCH_WORK_DIR/baseline-2"
 
       - name: Stop metrics proxy & generate Grafana URL
         id: metrics

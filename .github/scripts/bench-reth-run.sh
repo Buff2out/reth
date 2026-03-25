@@ -106,17 +106,6 @@ RETH_CPUS="1-${MAX_RETH}"
 
 BIG_BLOCKS="${BENCH_BIG_BLOCKS:-false}"
 
-# For big blocks, use reth-bb (which has relaxed consensus built-in).
-# The reth-bb binary lives next to the reth binary in the same target dir.
-if [ "$BIG_BLOCKS" = "true" ]; then
-  BB_BINARY="$(dirname "$BINARY")/reth-bb"
-  if [ ! -x "$BB_BINARY" ]; then
-    echo "::error::Big blocks mode requires reth-bb but $BB_BINARY not found"
-    exit 1
-  fi
-  BINARY="$BB_BINARY"
-fi
-
 RETH_ARGS=(
   node
   --datadir "$DATADIR"
