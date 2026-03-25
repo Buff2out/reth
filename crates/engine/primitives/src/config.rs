@@ -162,6 +162,11 @@ pub struct TreeConfig {
     /// When disabled, falls back to individual per-slot storage reads instead of
     /// batched cursor reads via `storage_range`.
     disable_bal_batch_io: bool,
+    /// Whether to disable BAL (Block Access List) tracking during block execution.
+    /// When disabled, the BAL builder is not attached to the state, `bump_bal_index` is skipped,
+    /// and BAL hash validation is bypassed. This isolates the pure BAL execution overhead for
+    /// benchmarking purposes.
+    disable_bal_tracking: bool,
     /// Maximum random jitter applied before each proof computation (trie-debug only).
     /// When set, each proof worker sleeps for a random duration up to this value
     /// before starting a proof calculation.
@@ -200,6 +205,7 @@ impl Default for TreeConfig {
             disable_bal_parallel_execution: false,
             disable_bal_parallel_state_root: false,
             disable_bal_batch_io: false,
+            disable_bal_tracking: false,
             #[cfg(feature = "trie-debug")]
             proof_jitter: None,
         }
@@ -264,6 +270,7 @@ impl TreeConfig {
             disable_bal_parallel_execution: false,
             disable_bal_parallel_state_root: false,
             disable_bal_batch_io: false,
+            disable_bal_tracking: false,
             #[cfg(feature = "trie-debug")]
             proof_jitter: None,
         }
@@ -625,6 +632,17 @@ impl TreeConfig {
     /// Setter for whether to disable BAL batched IO.
     pub const fn without_bal_batch_io(mut self, disable_bal_batch_io: bool) -> Self {
         self.disable_bal_batch_io = disable_bal_batch_io;
+        self
+    }
+
+    /// Returns whether BAL tracking during execution is disabled.
+    pub const fn disable_bal_tracking(&self) -> bool {
+        self.disable_bal_tracking
+    }
+
+    /// Setter for whether to disable BAL tracking during execution.
+    pub const fn without_bal_tracking(mut self, disable_bal_tracking: bool) -> Self {
+        self.disable_bal_tracking = disable_bal_tracking;
         self
     }
 }

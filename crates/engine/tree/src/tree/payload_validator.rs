@@ -873,7 +873,7 @@ where
     {
         debug!(target: "engine::tree::payload_validator", "Executing block");
 
-        let has_bal = input.block_access_list().is_some();
+        let has_bal = input.block_access_list().is_some() && !self.config.disable_bal_tracking();
 
         let mut db = debug_span!(target: "engine::tree", "build_state_db").in_scope(|| {
             State::builder()

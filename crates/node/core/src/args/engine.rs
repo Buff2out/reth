@@ -427,6 +427,11 @@ pub struct EngineArgs {
     /// to individual per-slot storage reads instead of batched cursor reads.
     #[arg(long = "engine.disable-bal-batch-io", default_value_t = false)]
     pub disable_bal_batch_io: bool,
+    /// Disable BAL (Block Access List) tracking during block execution. When set, the BAL
+    /// builder is not attached to the execution state, index bumps are skipped, and BAL hash
+    /// validation is bypassed. Useful for isolating BAL execution overhead in benchmarks.
+    #[arg(long = "engine.disable-bal-tracking", default_value_t = false)]
+    pub disable_bal_tracking: bool,
     /// Add random jitter before each proof computation (trie-debug only).
     /// Each proof worker sleeps for a random duration up to this value before
     /// starting work. Useful for stress-testing timing-sensitive proof logic.
@@ -506,6 +511,7 @@ impl Default for EngineArgs {
             bal_parallel_execution_disabled,
             bal_parallel_state_root_disabled,
             disable_bal_batch_io: false,
+            disable_bal_tracking: false,
             #[cfg(feature = "trie-debug")]
             proof_jitter: None,
         }
@@ -541,7 +547,8 @@ impl EngineArgs {
             .without_bal_parallel_execution(self.bal_parallel_execution_disabled)
             .without_bal_parallel_state_root(self.bal_parallel_state_root_disabled)
             .without_bal_parallel_state_root(self.bal_parallel_state_root_disabled)
-            .without_bal_batch_io(self.disable_bal_batch_io);
+            .without_bal_batch_io(self.disable_bal_batch_io)
+            .without_bal_tracking(self.disable_bal_tracking);
         #[cfg(feature = "trie-debug")]
         let config = config.with_proof_jitter(self.proof_jitter);
         config
@@ -602,6 +609,7 @@ mod tests {
             bal_parallel_execution_disabled: true,
             bal_parallel_state_root_disabled: true,
             disable_bal_batch_io: true,
+            disable_bal_tracking: true,
             #[cfg(feature = "trie-debug")]
             proof_jitter: None,
         };
@@ -645,6 +653,7 @@ mod tests {
             "--engine.disable-bal-parallel-execution",
             "--engine.disable-bal-parallel-state-root",
             "--engine.disable-bal-batch-io",
+            "--engine.disable-bal-tracking",
         ])
         .args;
 

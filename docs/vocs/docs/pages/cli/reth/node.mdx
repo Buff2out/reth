@@ -1029,6 +1029,9 @@ Engine:
       --engine.disable-bal-batch-io
           Disable BAL (Block Access List) batched IO during prewarming. When set, falls back to individual per-slot storage reads instead of batched cursor reads
 
+      --engine.disable-bal-tracking
+          Disable BAL (Block Access List) tracking during block execution. When set, the BAL builder is not attached to the execution state, index bumps are skipped, and BAL hash validation is bypassed. Useful for isolating BAL execution overhead in benchmarks
+
 ERA:
       --era.enable
           Enable import from ERA1 files
