@@ -16,7 +16,7 @@
 
 use alloy_consensus::{Header, Transaction};
 use alloy_eips::eip2718::Decodable2718;
-use alloy_evm::{env::BlockEnvironment, Evm, RecoveredTx};
+use alloy_evm::{Evm, RecoveredTx};
 use alloy_primitives::{map::HashSet, Address, U256};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV5;
@@ -145,7 +145,6 @@ where
                     .map_err(Eth::Error::from_eth_err)?;
                 if skip_basefee_check {
                     evm_env.cfg_env.disable_base_fee = true;
-                    evm_env.block_env.inner_mut().basefee = 0;
                 }
                 let ctx = evm_config
                     .context_for_next_block(&parent, env_attrs)
