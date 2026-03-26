@@ -252,6 +252,11 @@ where
             cfg_env.tx_gas_limit_cap = Some(MAX_TX_GAS_LIMIT_OSAKA);
         }
 
+        // TESTING ONLY: skip basefee validation during payload execution so that
+        // big-block payloads containing historical txs with stale gas prices can be
+        // accepted by the engine.
+        cfg_env.disable_base_fee = true;
+
         // derive the EIP-4844 blob fees from the header's `excess_blob_gas` and the current
         // blobparams
         let blob_excess_gas_and_price =
