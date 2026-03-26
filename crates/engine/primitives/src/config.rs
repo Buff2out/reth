@@ -170,7 +170,7 @@ impl Default for TreeConfig {
             always_compare_trie_updates: false,
             disable_state_cache: false,
             disable_prewarming: false,
-            state_provider_metrics: false,
+            state_provider_metrics: true,
             cross_block_cache_size: DEFAULT_CROSS_BLOCK_CACHE_SIZE,
             has_enough_parallelism: has_enough_parallelism(),
             multiproof_chunk_size: DEFAULT_MULTIPROOF_TASK_CHUNK_SIZE,

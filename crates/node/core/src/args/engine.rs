@@ -214,7 +214,7 @@ impl Default for DefaultEngineValues {
             legacy_state_root_task_enabled: false,
             state_cache_disabled: false,
             prewarming_disabled: false,
-            state_provider_metrics: false,
+            state_provider_metrics: true,
             cross_block_cache_size: DEFAULT_CROSS_BLOCK_CACHE_SIZE_MB,
             state_root_task_compare_updates: false,
             accept_execution_requests_hash: false,
