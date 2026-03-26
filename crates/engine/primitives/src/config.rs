@@ -646,8 +646,12 @@ mod tests {
     use super::TreeConfig;
 
     #[test]
-    #[should_panic(expected = "persistence_backpressure_threshold must be greater than persistence_threshold")]
+    #[should_panic(
+        expected = "persistence_backpressure_threshold must be greater than persistence_threshold"
+    )]
     fn rejects_backpressure_threshold_at_or_below_persistence_threshold() {
-        let _ = TreeConfig::default().with_persistence_threshold(4).with_persistence_backpressure_threshold(4);
+        let _ = TreeConfig::default()
+            .with_persistence_threshold(4)
+            .with_persistence_backpressure_threshold(4);
     }
 }

@@ -512,26 +512,21 @@ where
     /// Stashes a beacon message (newPayload / forkchoiceUpdated). Stamps it with `stashed_at`
     /// so we can measure how long it waited once it is eventually processed.
     fn stash_beacon_message(&mut self, message: BeaconEngineMessage<T>) {
-        self.stashed_engine_messages.push_back(StashedEngineMessage::Beacon {
-            stashed_at: Instant::now(),
-            message,
-        });
+        self.stashed_engine_messages
+            .push_back(StashedEngineMessage::Beacon { stashed_at: Instant::now(), message });
         self.update_backpressure_stash_len_metric();
     }
 
     /// Stashes a non-beacon engine message (e.g. downloaded blocks). These don't carry a
     /// timestamp because we don't track backpressure wait times for non-beacon messages.
-    fn stash_engine_message(
-        &mut self,
-        message: FromEngine<EngineApiRequest<T, N>, N::Block>,
-    ) {
+    fn stash_engine_message(&mut self, message: FromEngine<EngineApiRequest<T, N>, N::Block>) {
         self.stashed_engine_messages.push_back(StashedEngineMessage::Other(message));
         self.update_backpressure_stash_len_metric();
     }
 
     /// How many blocks the canonical tip is ahead of the last persisted block. A large gap means
     /// persistence is falling behind execution.
-    fn persistence_gap(&self) -> u64 {
+    const fn persistence_gap(&self) -> u64 {
         self.state
             .tree_state
             .canonical_block_number()
@@ -544,8 +539,8 @@ where
     /// configured threshold — meaning we've accumulated enough unpersisted blocks that we need
     /// to let persistence catch up before executing more.
     fn should_backpressure(&self) -> bool {
-        !self.stashed_engine_messages.is_empty()
-            && self.persistence_gap() >= self.config.persistence_backpressure_threshold()
+        !self.stashed_engine_messages.is_empty() &&
+            self.persistence_gap() >= self.config.persistence_backpressure_threshold()
     }
 
     fn try_process_stashed_engine_message(
@@ -589,25 +584,25 @@ where
             // first (see `on_engine_message`). Before we block-wait for new events, we try to
             // make progress on two fronts:
             //
-            //  1. Poll for persistence completion (non-blocking). If a background flush
-            //     finished, handle it and restart the loop - this shrinks the gap between
-            //     the canonical tip and the last persisted block.
+            //  1. Poll for persistence completion (non-blocking). If a background flush finished,
+            //     handle it and restart the loop - this shrinks the gap between the canonical tip
+            //     and the last persisted block.
             //
-            //  2. Try to drain one stashed message. This only succeeds when the persistence
-            //     gap is below `persistence_backpressure_threshold`; otherwise the stash
-            //     stays blocked and we skip to the wait below.
+            //  2. Try to drain one stashed message. This only succeeds when the persistence gap is
+            //     below `persistence_backpressure_threshold`; otherwise the stash stays blocked and
+            //     we skip to the wait below.
             //
             // If both checks fall through without doing work, we need to wait for an external
             // event. The wait strategy depends on whether we are backpressured:
             //
             //  - Backpressured (gap >= threshold, stash non-empty): we call
             //    `wait_for_persistence_event` which blocks until persistence completes. Any
-            //    incoming messages that arrive in the meantime are stashed, not processed.
-            //    This is what creates the actual back-pressure — the CL's requests sit in the
-            //    stash and their response channels stay open until we catch up.
+            //    incoming messages that arrive in the meantime are stashed, not processed. This is
+            //    what creates the actual back-pressure — the CL's requests sit in the stash and
+            //    their response channels stay open until we catch up.
             //
-            //  - Normal: we call `wait_for_event` which accepts whichever channel fires
-            //    first — persistence completion or incoming message.
+            //  - Normal: we call `wait_for_event` which accepts whichever channel fires first —
+            //    persistence completion or incoming message.
             match self.try_poll_persistence_completion() {
                 Ok(true) => {
                     if let Err(err) = self.advance_persistence() {
