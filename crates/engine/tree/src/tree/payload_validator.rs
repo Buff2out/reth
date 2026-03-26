@@ -1690,6 +1690,16 @@ where
                     trie_data_bytes,
                     "trie_updates_data_size"
                 );
+                let hashed_state_data_bytes = computed.hashed_state.data_size();
+                block_validation_metrics
+                    .hashed_state_sorted_data_bytes
+                    .record(hashed_state_data_bytes as f64);
+                tracing::info!(
+                    target: "engine::tree",
+                    block_number,
+                    hashed_state_data_bytes,
+                    "hashed_state_data_size"
+                );
                 if let Some(anchored) = &computed.anchored_trie_input {
                     block_validation_metrics
                         .anchored_overlay_trie_updates_size

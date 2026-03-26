@@ -552,6 +552,26 @@ impl HashedPostStateSorted {
         self.accounts.len() + self.storages.values().map(|s| s.len()).sum::<usize>()
     }
 
+    /// Returns the total serialized byte size of all hashed state data (keys + values).
+    ///
+    /// For each account: B256 key (32 bytes) + nonce (8) + balance (32) + optional bytecode_hash
+    /// (32). Destroyed accounts contribute only their key size.
+    /// For each storage slot: B256 hashed_address (32) + B256 slot key (32) + U256 value (32).
+    pub fn data_size(&self) -> usize {
+        let accounts_size: usize = self
+            .accounts
+            .iter()
+            .map(|(_, acct)| {
+                // B256 key + account fields (or 0 for destroyed)
+                32 + acct.map_or(0, |a| 8 + 32 + a.bytecode_hash.map_or(0, |_| 32))
+            })
+            .sum();
+
+        let storages_size: usize = self.storages.values().map(|s| s.data_size()).sum();
+
+        accounts_size + storages_size
+    }
+
     /// Construct [`TriePrefixSetsMut`] from hashed post state.
     ///
     /// The prefix sets contain the hashed account and storage keys that have been changed in the
@@ -720,6 +740,13 @@ impl HashedStorageSorted {
     /// Returns `true` if there are no storage slot updates.
     pub const fn is_empty(&self) -> bool {
         self.storage_slots.is_empty()
+    }
+
+    /// Returns the total serialized byte size of storage slot data (keys + values).
+    ///
+    /// Each slot: B256 hashed_address (32) + B256 slot key (32) + U256 value (32) = 96 bytes.
+    pub fn data_size(&self) -> usize {
+        self.storage_slots.len() * 96
     }
 
     /// Extends the storage slots updates with another set of sorted updates.

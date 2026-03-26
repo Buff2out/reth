@@ -535,6 +535,8 @@ pub struct BlockValidationMetrics {
     pub trie_updates_sorted_size: Histogram,
     /// Serialized byte size of `TrieUpdatesSorted` (`data_size`)
     pub trie_updates_sorted_data_bytes: Histogram,
+    /// Serialized byte size of `HashedPostStateSorted` (`data_size`)
+    pub hashed_state_sorted_data_bytes: Histogram,
     /// Size of `AnchoredTrieInput` overlay `TrieUpdatesSorted` (`total_len`)
     pub anchored_overlay_trie_updates_size: Histogram,
     /// Size of `AnchoredTrieInput` overlay `HashedPostStateSorted` (`total_len`)

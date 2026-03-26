@@ -673,6 +673,7 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
                     blocks.iter().rev().map(|b| b.trie_data().hashed_state),
                 );
                 if !merged_hashed_state.is_empty() {
+                    timings.hashed_state_data_bytes += merged_hashed_state.data_size();
                     self.write_hashed_state(&merged_hashed_state)?;
                 }
                 timings.write_hashed_state += start.elapsed();
