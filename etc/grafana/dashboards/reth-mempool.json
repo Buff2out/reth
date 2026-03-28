@@ -3923,7 +3923,7 @@
     "refresh": "30s",
     "revision": 1,
     "schemaVersion": 39,
-    "tags": [],
+    "tags": ["reth"],
     "templating": {
         "list": [
             {

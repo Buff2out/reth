@@ -3534,7 +3534,7 @@
     "refresh": "5s",
     "schemaVersion": 38,
     "style": "dark",
-    "tags": [],
+    "tags": ["reth"],
     "templating": {
       "list": [
         {
