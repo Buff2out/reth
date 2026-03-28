@@ -374,74 +374,22 @@
       "type": "timeseries"
     },
     {
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 40
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "cfh1s6prbv4lcc"
-          },
-          "expr": "reth_revmc_jit_jit_compilation_duration{quantile=\"0.5\"}",
-          "legendFormat": "p50"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "cfh1s6prbv4lcc"
-          },
-          "expr": "reth_revmc_jit_jit_compilation_duration{quantile=\"0.9\"}",
-          "legendFormat": "p90"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "cfh1s6prbv4lcc"
-          },
-          "expr": "reth_revmc_jit_jit_compilation_duration{quantile=\"0.99\"}",
-          "legendFormat": "p99"
-        }
-      ],
-      "title": "JIT Compilation Duration",
-      "type": "timeseries"
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
+      "title": "Compilation Timings",
+      "type": "row"
     },
     {
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          },
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
           "unit": "s"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 40
-      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 41 },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "cfh1s6prbv4lcc"
-          },
+          "datasource": { "type": "prometheus", "uid": "cfh1s6prbv4lcc" },
           "expr": "reth_revmc_jit_jit_compilation_duration_last",
           "legendFormat": "last compilation"
         }
@@ -452,20 +400,41 @@
     {
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          },
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
           "unit": "s"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 48
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 41 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "cfh1s6prbv4lcc" },
+          "expr": "reth_revmc_jit_jit_compilation_duration{quantile=\"0.5\"}",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "cfh1s6prbv4lcc" },
+          "expr": "reth_revmc_jit_jit_compilation_duration{quantile=\"0.9\"}",
+          "legendFormat": "p90"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "cfh1s6prbv4lcc" },
+          "expr": "reth_revmc_jit_jit_compilation_duration{quantile=\"0.99\"}",
+          "legendFormat": "p99"
+        }
+      ],
+      "title": "JIT Compilation Duration",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "s"
+        },
+        "overrides": []
       },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 49 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "cfh1s6prbv4lcc" },
@@ -494,20 +463,12 @@
     {
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          },
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
           "unit": "s"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 48
-      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 49 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "cfh1s6prbv4lcc" },
