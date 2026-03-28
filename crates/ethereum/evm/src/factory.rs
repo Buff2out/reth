@@ -93,6 +93,14 @@ pub struct RevmcMetrics {
     pub jit_data_bytes: metrics::Gauge,
     /// Number of pending JIT compilation jobs in the queue.
     pub jit_queue_len: metrics::Gauge,
+    /// Total number of entries evicted (idle + budget).
+    pub evictions: metrics::Gauge,
+    /// Total number of JIT promotions (hot threshold reached).
+    pub jit_promotions: metrics::Gauge,
+    /// Total number of successful JIT compilations.
+    pub jit_successes: metrics::Gauge,
+    /// Total number of failed JIT compilations.
+    pub jit_failures: metrics::Gauge,
 }
 
 impl RevmcMetrics {
@@ -107,6 +115,10 @@ impl RevmcMetrics {
             jit_code_bytes,
             jit_data_bytes,
             jit_queue_len,
+            evictions,
+            jit_promotions,
+            jit_successes,
+            jit_failures,
         } = *stats;
         self.lookup_hits.set(lookup_hits as f64);
         self.lookup_misses.set(lookup_misses as f64);
@@ -116,5 +128,9 @@ impl RevmcMetrics {
         self.jit_code_bytes.set(jit_code_bytes as f64);
         self.jit_data_bytes.set(jit_data_bytes as f64);
         self.jit_queue_len.set(jit_queue_len as f64);
+        self.evictions.set(evictions as f64);
+        self.jit_promotions.set(jit_promotions as f64);
+        self.jit_successes.set(jit_successes as f64);
+        self.jit_failures.set(jit_failures as f64);
     }
 }
