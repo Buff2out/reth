@@ -12047,9 +12047,7 @@
   ],
   "refresh": "5s",
   "schemaVersion": 42,
-  "tags": [
-    "reth"
-  ],
+  "tags": [],
   "templating": {
     "list": [
       {
@@ -12113,5 +12111,7 @@
   "timepicker": {},
   "timezone": "",
   "title": "Reth",
+  "uid": "2k8BXz24x",
+  "version": 4,
   "weekStart": ""
 }

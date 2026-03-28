@@ -452,11 +452,7 @@
   ],
   "refresh": "10s",
   "schemaVersion": 39,
-  "tags": [
-    "jit",
-    "reth",
-    "revmc"
-  ],
+  "tags": ["reth", "revmc", "jit"],
   "time": {
     "from": "now-1h",
     "to": "now"
