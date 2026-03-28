@@ -445,6 +445,7 @@ where
             lookup_event_channel_capacity: jit.channel_capacity,
             max_pending_jit_jobs: jit.max_pending_jobs,
             jit_worker_count: jit.worker_count.unwrap_or(default_tuning.jit_worker_count),
+            resident_code_cache_bytes: 1024 * 1024 * 1024, // 1 GiB
             ..default_tuning
         };
 
