@@ -2,6 +2,7 @@ use super::{
     metrics::StaticFileProviderMetrics, writer::StaticFileWriters, LoadedJar,
     StaticFileJarProvider, StaticFileProviderRW, StaticFileProviderRWRefMut,
 };
+
 use crate::{
     changeset_walker::{StaticFileAccountChangesetWalker, StaticFileStorageChangesetWalker},
     to_range, BlockHashReader, BlockNumReader, BlockReader, BlockSource, EitherWriter,
@@ -2353,6 +2354,16 @@ pub trait StaticFileWriter {
     ///
     /// Returns an error if prune is queued (use [`Self::commit`] instead).
     fn finalize(&self) -> ProviderResult<()>;
+
+    /// Takes queued changeset prune strategies from the writers, deferring their execution.
+    ///
+    /// Returns the target block number which can be re-applied later via
+    /// [`Self::requeue_changeset_prunes`].
+    fn take_changeset_prunes(&self) -> Option<BlockNumber>;
+
+    /// Re-queues previously deferred changeset prunes onto the writers so they execute on the
+    /// next [`Self::commit`].
+    fn requeue_changeset_prunes(&self, last_block: BlockNumber) -> ProviderResult<()>;
 }
 
 impl<N: NodePrimitives> StaticFileWriter for StaticFileProvider<N> {
@@ -2394,6 +2405,14 @@ impl<N: NodePrimitives> StaticFileWriter for StaticFileProvider<N> {
 
     fn finalize(&self) -> ProviderResult<()> {
         self.writers.finalize()
+    }
+
+    fn take_changeset_prunes(&self) -> Option<BlockNumber> {
+        self.writers.take_changeset_prunes()
+    }
+
+    fn requeue_changeset_prunes(&self, last_block: BlockNumber) -> ProviderResult<()> {
+        self.writers.requeue_changeset_prunes(last_block)
     }
 }
 

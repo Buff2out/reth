@@ -8,6 +8,7 @@ use reth_primitives_traits::{FastInstant as Instant, NodePrimitives};
 use reth_provider::{
     providers::ProviderNodeTypes, BlockExecutionWriter, BlockHashReader, ChainStateBlockWriter,
     DBProvider, DatabaseProviderFactory, ProviderFactory, SaveBlocksMode,
+    StaticFileProviderFactory, StaticFileWriter,
 };
 use reth_prune::{PrunerError, PrunerWithFactory};
 use reth_stages_api::{MetricEvent, MetricEventsSender};
@@ -60,6 +61,12 @@ where
     /// Pending safe block number to be committed with the next block save.
     /// This avoids triggering a separate fsync for each safe block update.
     pending_safe_block: Option<u64>,
+    /// Deferred changeset prune target block from a previous `RemoveBlocksAbove` operation.
+    ///
+    /// During reorgs, changeset static file truncation is deferred to the next `SaveBlocks`
+    /// commit to avoid truncating files while concurrent readers (payload builders, RPC) may
+    /// still hold stale memory-mapped file handles.
+    deferred_changeset_prune: Option<u64>,
 }
 
 impl<N> PersistenceService<N>
@@ -81,6 +88,7 @@ where
             sync_metrics_tx,
             pending_finalized_block: None,
             pending_safe_block: None,
+            deferred_changeset_prune: None,
         }
     }
 }
@@ -128,7 +136,7 @@ where
 
     #[instrument(level = "debug", target = "engine::persistence", skip_all, fields(%new_tip_num))]
     fn on_remove_blocks_above(
-        &self,
+        &mut self,
         new_tip_num: u64,
     ) -> Result<Option<BlockNumHash>, PersistenceError> {
         debug!(target: "engine::persistence", ?new_tip_num, "Removing blocks");
@@ -137,6 +145,22 @@ where
 
         let new_tip_hash = provider_rw.block_hash(new_tip_num)?;
         provider_rw.remove_block_and_execution_above(new_tip_num)?;
+
+        // Defer changeset static file truncation to the next SaveBlocks commit.
+        //
+        // `remove_block_and_execution_above` queues prune strategies on the changeset SF
+        // writers. If we let commit() execute them now, it would truncate the underlying
+        // files while concurrent readers (payload builders, RPC) may still hold stale
+        // memory-mapped handles — causing a panic or SIGBUS.
+        //
+        // By taking the strategies here and re-applying them later in `on_save_blocks`,
+        // we ensure the truncation only happens when no reader needs the old data:
+        // after the reorg completes and the next batch of blocks is persisted.
+        if let Some(target) = self.provider.static_file_provider().take_changeset_prunes() {
+            self.deferred_changeset_prune =
+                Some(self.deferred_changeset_prune.map_or(target, |prev| prev.min(target)));
+        }
+
         provider_rw.commit()?;
 
         debug!(target: "engine::persistence", ?new_tip_num, ?new_tip_hash, "Removed blocks from disk");
@@ -159,6 +183,17 @@ where
         debug!(target: "engine::persistence", ?block_count, first=?first_block, last=?last_block, "Saving range of blocks");
 
         let start_time = Instant::now();
+
+        // Apply any deferred changeset prunes from a previous RemoveBlocksAbove.
+        // By this point the reorg is complete and no concurrent reader needs the old data,
+        // so it is safe to truncate the changeset static files now.
+        if let Some(last_block) = self.deferred_changeset_prune.take() {
+            debug!(target: "engine::persistence", last_block, "Applying deferred changeset prunes");
+            let sf = self.provider.static_file_provider();
+            sf.requeue_changeset_prunes(last_block)?;
+            sf.commit()?;
+            debug!(target: "engine::persistence", last_block, "Applied deferred changeset prunes");
+        }
 
         if let Some(last) = last_block {
             let provider_rw = self.provider.database_provider_rw()?;
@@ -374,12 +409,34 @@ impl Drop for ServiceGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::B256;
+    use alloy_consensus::Header;
+    use alloy_primitives::{Address, B256, U256};
     use reth_chain_state::test_utils::TestBlockBuilder;
+    use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
     use reth_exex_types::FinishedExExHeight;
-    use reth_provider::test_utils::create_test_provider_factory;
+    use reth_primitives_traits::{SealedBlock, SealedHeader};
+    use reth_provider::{
+        test_utils::create_test_provider_factory, ChangeSetReader, HeaderProvider, StorageSettings,
+        StorageSettingsCache,
+    };
     use reth_prune::Pruner;
+    use reth_revm::db::BundleState;
+    use revm_state::AccountInfo;
+    use std::sync::Arc;
     use tokio::sync::mpsc::unbounded_channel;
+
+    fn persistence_handle_with_factory(
+        provider: ProviderFactory<reth_provider::test_utils::MockNodeTypesWithDB>,
+    ) -> PersistenceHandle<EthPrimitives> {
+        let (_finished_exex_height_tx, finished_exex_height_rx) =
+            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+
+        let pruner =
+            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
+
+        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
+        PersistenceHandle::<EthPrimitives>::spawn_service(provider, pruner, sync_metrics_tx)
+    }
 
     fn default_persistence_handle() -> PersistenceHandle<EthPrimitives> {
         let provider = create_test_provider_factory();
@@ -508,5 +565,133 @@ mod tests {
         let entries: Vec<u64> = shards.iter().flat_map(|(_, list)| list.iter()).collect();
         let expected: Vec<u64> = (15..25).collect();
         assert_eq!(entries, expected, "new entries 20..25 must survive pruning");
+    }
+
+    /// Verifies that changeset static file truncation is deferred during reorgs.
+    ///
+    /// Headers are truncated immediately by `RemoveBlocksAbove`, but changeset prunes are
+    /// deferred to the next `SaveBlocks` to avoid truncating files while concurrent readers
+    /// (payload builders, RPC) may still hold memory-mapped handles.
+    #[test]
+    fn test_deferred_changeset_prune_on_reorg() {
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(StorageSettings::v2());
+
+        // -- Phase 1: Persist genesis + blocks 1..3 with account state changes --
+
+        let genesis = SealedBlock::<reth_ethereum_primitives::Block>::from_sealed_parts(
+            SealedHeader::new(
+                Header { number: 0, difficulty: U256::from(1), ..Default::default() },
+                B256::ZERO,
+            ),
+            Default::default(),
+        );
+        let genesis_executed = ExecutedBlock::new(
+            Arc::new(genesis.try_recover().unwrap()),
+            Arc::new(BlockExecutionOutput {
+                result: BlockExecutionResult {
+                    receipts: vec![],
+                    requests: Default::default(),
+                    gas_used: 0,
+                    blob_gas_used: 0,
+                },
+                state: Default::default(),
+            }),
+            Default::default(),
+        );
+
+        let provider_rw = factory.provider_rw().unwrap();
+        provider_rw.save_blocks(vec![genesis_executed], SaveBlocksMode::Full).unwrap();
+        provider_rw.commit().unwrap();
+
+        // Build blocks 1..3 with account changes so changesets are written to SF
+        let mut blocks = Vec::new();
+        let mut parent_hash = B256::ZERO;
+        for block_num in 1..=3u64 {
+            let address = Address::with_last_byte(block_num as u8);
+            let bundle = BundleState::builder(block_num..=block_num)
+                .state_present_account_info(
+                    address,
+                    AccountInfo {
+                        nonce: block_num,
+                        balance: U256::from(block_num * 100),
+                        ..Default::default()
+                    },
+                )
+                .revert_account_info(block_num, address, Some(None))
+                .build();
+
+            let header = Header {
+                number: block_num,
+                parent_hash,
+                difficulty: U256::from(1),
+                ..Default::default()
+            };
+            let block = SealedBlock::<reth_ethereum_primitives::Block>::seal_parts(
+                header,
+                Default::default(),
+            );
+            parent_hash = block.hash();
+
+            blocks.push(ExecutedBlock::new(
+                Arc::new(block.try_recover().unwrap()),
+                Arc::new(BlockExecutionOutput {
+                    result: BlockExecutionResult {
+                        receipts: vec![],
+                        requests: Default::default(),
+                        gas_used: 0,
+                        blob_gas_used: 0,
+                    },
+                    state: bundle,
+                }),
+                Default::default(),
+            ));
+        }
+
+        let handle = persistence_handle_with_factory(factory.clone());
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        handle.save_blocks(blocks, tx).unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("save_blocks timed out");
+
+        // -- Phase 2: Simulate builder getting a reader before reorg --
+
+        let sf = factory.static_file_provider();
+
+        // Builder reads block 2 changesets — this should work
+        let changesets_block2 = sf.account_block_changeset(2).unwrap();
+        assert!(!changesets_block2.is_empty(), "block 2 should have changesets before reorg");
+
+        // -- Phase 3: Reorg via RemoveBlocksAbove(1) --
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        handle.remove_blocks_above(1, tx).unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("remove_blocks timed out");
+
+        // -- Phase 4: Headers are truncated immediately, but changesets are deferred --
+
+        assert!(
+            sf.header_by_number(2).unwrap().is_none(),
+            "header 2 should be gone after reorg (truncated immediately)"
+        );
+
+        let changesets_after_reorg = sf.account_block_changeset(2).unwrap();
+        assert!(
+            !changesets_after_reorg.is_empty(),
+            "block 2 changesets should still be readable after reorg (prune deferred)"
+        );
+
+        // -- Phase 5: Next save_blocks applies the deferred prune --
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        handle.save_blocks(vec![], tx).unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("save_blocks timed out");
+
+        // -- Phase 6: Block 2 changesets should now be gone --
+
+        let changesets_after_prune = sf.account_block_changeset(2).unwrap();
+        assert!(
+            changesets_after_prune.is_empty(),
+            "block 2 changesets should be gone after deferred prune applied"
+        );
     }
 }

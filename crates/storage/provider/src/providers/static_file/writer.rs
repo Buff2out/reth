@@ -142,6 +142,42 @@ impl<N: NodePrimitives> StaticFileWriters<N> {
         Ok(())
     }
 
+    /// Takes queued changeset prune strategies from the account and storage changeset writers,
+    /// returning the target block number. The writers will no longer execute these prunes on
+    /// commit.
+    pub(crate) fn take_changeset_prunes(&self) -> Option<BlockNumber> {
+        let account = {
+            let mut writer = self.account_change_sets.write();
+            writer.as_mut().and_then(|w| w.take_changeset_prune())
+        };
+        let storage = {
+            let mut writer = self.storage_change_sets.write();
+            writer.as_mut().and_then(|w| w.take_changeset_prune())
+        };
+        debug_assert_eq!(
+            account, storage,
+            "account and storage changeset prunes must target the same block"
+        );
+        account.or(storage)
+    }
+
+    /// Re-queues previously deferred changeset prunes onto the writers.
+    pub(crate) fn requeue_changeset_prunes(&self, last_block: BlockNumber) -> ProviderResult<()> {
+        {
+            let mut writer = self.account_change_sets.write();
+            if let Some(w) = writer.as_mut() {
+                w.prune_account_changesets(last_block)?;
+            }
+        }
+        {
+            let mut writer = self.storage_change_sets.write();
+            if let Some(w) = writer.as_mut() {
+                w.prune_storage_changesets(last_block)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn has_unwind_queued(&self) -> bool {
         for writer_lock in [
             &self.headers,
@@ -365,6 +401,20 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
     /// Returns `true` if the writer will prune on commit.
     pub const fn will_prune_on_commit(&self) -> bool {
         self.prune_on_commit.is_some()
+    }
+
+    /// Takes the queued changeset prune strategy, returning the target block number if one was
+    /// queued. Only meaningful for changeset segment writers.
+    fn take_changeset_prune(&mut self) -> Option<BlockNumber> {
+        match self.prune_on_commit.take() {
+            Some(PruneStrategy::AccountChangeSets { last_block }) |
+            Some(PruneStrategy::StorageChangeSets { last_block }) => Some(last_block),
+            other => {
+                // Put it back if it wasn't a changeset prune
+                self.prune_on_commit = other;
+                None
+            }
+        }
     }
 
     /// Heals the changeset offset sidecar after `NippyJar` healing.
