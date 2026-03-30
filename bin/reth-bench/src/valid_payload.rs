@@ -209,7 +209,7 @@ pub(crate) fn block_to_new_payload<C: PayloadConverter>(
     }
 }
 
-/// Calls the correct `engine_newPayload` method depending on the given [`ExecutionPayload`] and its
+/// Calls the correct `engine_newPayload` method depending on the given execution payload and its
 /// versioned variant. Returns the [`EngineApiMessageVersion`] depending on the payload's version.
 ///
 /// # Panics
