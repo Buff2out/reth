@@ -223,6 +223,7 @@ impl TestHarness {
             evm_config,
             changeset_cache,
             reth_tasks::Runtime::test(),
+            Arc::new(parking_lot::RwLock::new(())),
         );
 
         let block_builder = TestBlockBuilder::default().with_chain_spec((*chain_spec).clone());

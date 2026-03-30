@@ -60,6 +60,10 @@ where
     /// Pending safe block number to be committed with the next block save.
     /// This avoids triggering a separate fsync for each safe block update.
     pending_safe_block: Option<u64>,
+    /// Shared lock for mutual exclusion between block removal (write) and payload
+    /// building (read). Prevents concurrent readers from accessing static files
+    /// while they are being truncated during reorgs.
+    block_removal_lock: Arc<parking_lot::RwLock<()>>,
 }
 
 impl<N> PersistenceService<N>
@@ -72,6 +76,7 @@ where
         incoming: Receiver<PersistenceAction<N::Primitives>>,
         pruner: PrunerWithFactory<ProviderFactory<N>>,
         sync_metrics_tx: MetricEventsSender,
+        block_removal_lock: Arc<parking_lot::RwLock<()>>,
     ) -> Self {
         Self {
             provider,
@@ -81,6 +86,7 @@ where
             sync_metrics_tx,
             pending_finalized_block: None,
             pending_safe_block: None,
+            block_removal_lock,
         }
     }
 }
@@ -133,6 +139,11 @@ where
     ) -> Result<Option<BlockNumHash>, PersistenceError> {
         debug!(target: "engine::persistence", ?new_tip_num, "Removing blocks");
         let start_time = Instant::now();
+
+        // Acquire exclusive lock to prevent concurrent readers (e.g., payload builders)
+        // from accessing static files while they are being truncated.
+        let _write_guard = self.block_removal_lock.write();
+
         let provider_rw = self.provider.database_provider_rw()?;
 
         let new_tip_hash = provider_rw.block_hash(new_tip_num)?;
@@ -267,6 +278,7 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
         provider_factory: ProviderFactory<N>,
         pruner: PrunerWithFactory<ProviderFactory<N>>,
         sync_metrics_tx: MetricEventsSender,
+        block_removal_lock: Arc<parking_lot::RwLock<()>>,
     ) -> PersistenceHandle<N::Primitives>
     where
         N: ProviderNodeTypes,
@@ -275,8 +287,13 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
         let (db_service_tx, db_service_rx) = std::sync::mpsc::channel();
 
         // spawn the persistence service
-        let db_service =
-            PersistenceService::new(provider_factory, db_service_rx, pruner, sync_metrics_tx);
+        let db_service = PersistenceService::new(
+            provider_factory,
+            db_service_rx,
+            pruner,
+            sync_metrics_tx,
+            block_removal_lock,
+        );
         let join_handle = spawn_os_thread("persistence", || {
             if let Err(err) = db_service.run() {
                 error!(target: "engine::persistence", ?err, "Persistence service failed");
@@ -391,7 +408,12 @@ mod tests {
             Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
 
         let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        PersistenceHandle::<EthPrimitives>::spawn_service(provider, pruner, sync_metrics_tx)
+        PersistenceHandle::<EthPrimitives>::spawn_service(
+            provider,
+            pruner,
+            sync_metrics_tx,
+            Arc::new(parking_lot::RwLock::new(())),
+        )
     }
 
     #[test]

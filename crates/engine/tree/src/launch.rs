@@ -29,6 +29,13 @@ use reth_tasks::Runtime;
 use reth_trie_db::ChangesetCache;
 use std::sync::Arc;
 
+/// Shared lock for mutual exclusion between block removal (write) and payload building (read).
+///
+/// During reorgs, the persistence service truncates static file mmaps. Concurrent readers
+/// (e.g., payload builders) holding stale mmap references can read garbage data and panic.
+/// This lock ensures that block removal and payload building do not execute concurrently.
+pub type BlockRemovalLock = Arc<parking_lot::RwLock<()>>;
+
 /// Builds the engine [`ChainOrchestrator`] that drives the chain forward.
 ///
 /// This spawns and wires together the following components:
@@ -65,6 +72,7 @@ pub fn build_engine_orchestrator<N, Client, S, V, C>(
     evm_config: C,
     changeset_cache: ChangesetCache,
     runtime: Runtime,
+    block_removal_lock: BlockRemovalLock,
 ) -> ChainOrchestrator<
     EngineHandler<
         EngineApiRequestHandler<EngineApiRequest<N::Payload, N::Primitives>, N::Primitives>,
@@ -82,8 +90,12 @@ where
 {
     let downloader = BasicBlockDownloader::new(client, consensus.clone());
 
-    let persistence_handle =
-        PersistenceHandle::<N::Primitives>::spawn_service(provider, pruner, sync_metrics_tx);
+    let persistence_handle = PersistenceHandle::<N::Primitives>::spawn_service(
+        provider,
+        pruner,
+        sync_metrics_tx,
+        block_removal_lock.clone(),
+    );
 
     let canonical_in_memory_state = blockchain_db.canonical_in_memory_state();
 
@@ -99,6 +111,7 @@ where
         evm_config,
         changeset_cache,
         runtime,
+        block_removal_lock,
     );
 
     let engine_handler = EngineApiRequestHandler::new(to_tree_tx, from_tree);

@@ -243,6 +243,7 @@ impl EngineNodeLauncher {
             ctx.components().evm_config().clone(),
             changeset_cache,
             ctx.task_executor().clone(),
+            ctx.block_removal_lock(),
         );
 
         info!(target: "reth::cli", "Consensus engine initialized");

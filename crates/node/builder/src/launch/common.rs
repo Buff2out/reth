@@ -824,6 +824,7 @@ where
             },
             node_adapter,
             head,
+            block_removal_lock: builder_ctx.block_removal_lock(),
         };
 
         let ctx = LaunchContextWith {
@@ -889,6 +890,11 @@ where
     /// Returns a reference to the blockchain provider.
     pub const fn blockchain_db(&self) -> &T::Provider {
         &self.node_adapter().provider
+    }
+
+    /// Returns the shared lock for mutual exclusion between block removal and payload building.
+    pub fn block_removal_lock(&self) -> Arc<parking_lot::RwLock<()>> {
+        self.right().block_removal_lock.clone()
     }
 
     /// Returns the initial backfill to sync to at launch.
@@ -1242,6 +1248,8 @@ where
     db_provider_container: WithMeteredProvider<NodeTypesWithDBAdapter<T::Types, T::DB>>,
     node_adapter: NodeAdapter<T, CB::Components>,
     head: Head,
+    /// Shared lock for mutual exclusion between block removal and payload building.
+    block_removal_lock: Arc<parking_lot::RwLock<()>>,
 }
 
 /// Returns the metrics hooks for the node.

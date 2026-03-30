@@ -750,17 +750,27 @@ pub struct BuilderContext<Node: FullNodeTypes> {
     pub(crate) executor: TaskExecutor,
     /// Config container
     pub(crate) config_container: WithConfigs<<Node::Types as NodeTypes>::ChainSpec>,
+    /// Shared lock that provides mutual exclusion between block removal (write) and
+    /// payload building (read). Prevents concurrent readers from accessing static files
+    /// while they are being truncated during reorgs.
+    pub(crate) block_removal_lock: Arc<parking_lot::RwLock<()>>,
 }
 
 impl<Node: FullNodeTypes> BuilderContext<Node> {
     /// Create a new instance of [`BuilderContext`]
-    pub const fn new(
+    pub fn new(
         head: Head,
         provider: Node::Provider,
         executor: TaskExecutor,
         config_container: WithConfigs<<Node::Types as NodeTypes>::ChainSpec>,
     ) -> Self {
-        Self { head, provider, executor, config_container }
+        Self {
+            head,
+            provider,
+            executor,
+            config_container,
+            block_removal_lock: Arc::new(parking_lot::RwLock::new(())),
+        }
     }
 
     /// Returns the configured provider to interact with the blockchain.
@@ -813,6 +823,12 @@ impl<Node: FullNodeTypes> BuilderContext<Node> {
     /// Loads `EnvKzgSettings::Default`.
     pub const fn kzg_settings(&self) -> eyre::Result<EnvKzgSettings> {
         Ok(EnvKzgSettings::Default)
+    }
+
+    /// Returns the shared lock used for mutual exclusion between block removal and payload
+    /// building.
+    pub fn block_removal_lock(&self) -> Arc<parking_lot::RwLock<()>> {
+        self.block_removal_lock.clone()
     }
 
     /// Returns the config for payload building.

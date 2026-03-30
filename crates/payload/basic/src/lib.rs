@@ -67,6 +67,9 @@ pub struct BasicPayloadJobGenerator<Client, Builder> {
     builder: Builder,
     /// Stored `cached_reads` for new payload jobs.
     pre_cached: Option<PrecachedState>,
+    /// Shared lock that prevents payload building from racing with block removal.
+    /// When set, a read guard is held for the duration of each `try_build` call.
+    block_removal_lock: Option<Arc<parking_lot::RwLock<()>>>,
 }
 
 // === impl BasicPayloadJobGenerator ===
@@ -87,7 +90,17 @@ impl<Client, Builder> BasicPayloadJobGenerator<Client, Builder> {
             config,
             builder,
             pre_cached: None,
+            block_removal_lock: None,
         }
+    }
+
+    /// Sets the shared block removal lock.
+    ///
+    /// When set, a read guard is acquired for the duration of each payload `try_build` call,
+    /// preventing concurrent block removal from truncating static files mid-read.
+    pub fn with_block_removal_lock(mut self, lock: Arc<parking_lot::RwLock<()>>) -> Self {
+        self.block_removal_lock = Some(lock);
+        self
     }
 
     /// Returns the maximum duration a job should be allowed to run.
@@ -182,6 +195,7 @@ where
             payload_task_guard: self.payload_task_guard.clone(),
             metrics: Default::default(),
             builder: self.builder.clone(),
+            block_removal_lock: self.block_removal_lock.clone(),
         };
 
         // start the first job right away
@@ -337,6 +351,8 @@ where
     ///
     /// See [`PayloadBuilder`]
     builder: Builder,
+    /// Shared lock that prevents payload building from racing with block removal.
+    block_removal_lock: Option<Arc<parking_lot::RwLock<()>>>,
 }
 
 impl<Builder> BasicPayloadJob<Builder>
@@ -359,6 +375,7 @@ where
         let execution_cache = self.execution_cache.clone();
         let trie_handle = self.trie_handle.take();
         let builder = self.builder.clone();
+        let block_removal_lock = self.block_removal_lock.clone();
         self.executor.spawn_blocking_task(async move {
             // acquire the permit for executing the task
             let _permit = guard.acquire().await;
@@ -370,6 +387,9 @@ where
                 cancel,
                 best_payload,
             };
+            // Hold a read guard for the duration of try_build to prevent concurrent
+            // block removal from truncating static files while we read from them.
+            let _read_guard = block_removal_lock.as_ref().map(|lock| lock.read());
             let result = builder.try_build(args);
             let _ = tx.send(result);
         });

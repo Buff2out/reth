@@ -306,6 +306,10 @@ where
     execution_timing_stats: HashMap<B256, Box<ExecutionTimingStats>>,
     /// Task runtime for spawning blocking work on named, reusable threads.
     runtime: reth_tasks::Runtime,
+    /// Shared lock for mutual exclusion between block removal (write) and engine/payload
+    /// building (read). Prevents concurrent readers from accessing static files while they
+    /// are being truncated during reorgs.
+    block_removal_lock: crate::launch::BlockRemovalLock,
 }
 
 impl<N, P: Debug, T: PayloadTypes + Debug, V: Debug, C> std::fmt::Debug
@@ -333,6 +337,7 @@ where
             .field("changeset_cache", &self.changeset_cache)
             .field("execution_timing_stats", &self.execution_timing_stats.len())
             .field("runtime", &self.runtime)
+            .field("block_removal_lock", &self.block_removal_lock)
             .finish()
     }
 }
@@ -373,6 +378,7 @@ where
         evm_config: C,
         changeset_cache: ChangesetCache,
         runtime: reth_tasks::Runtime,
+        block_removal_lock: crate::launch::BlockRemovalLock,
     ) -> Self {
         let (incoming_tx, incoming) = crossbeam_channel::unbounded();
 
@@ -396,6 +402,7 @@ where
             changeset_cache,
             execution_timing_stats: HashMap::new(),
             runtime,
+            block_removal_lock,
         }
     }
 
@@ -417,6 +424,7 @@ where
         evm_config: C,
         changeset_cache: ChangesetCache,
         runtime: reth_tasks::Runtime,
+        block_removal_lock: crate::launch::BlockRemovalLock,
     ) -> (Sender<FromEngine<EngineApiRequest<T, N>, N::Block>>, UnboundedReceiver<EngineApiEvent<N>>)
     {
         let best_block_number = provider.best_block_number().unwrap_or(0);
@@ -450,6 +458,7 @@ where
             evm_config,
             changeset_cache,
             runtime,
+            block_removal_lock,
         );
         let incoming = task.incoming_tx.clone();
         spawn_os_thread("engine", || {
@@ -1568,6 +1577,10 @@ where
                                 let has_attrs = payload_attrs.is_some();
 
                                 let start = Instant::now();
+                                // Hold a read guard to prevent concurrent block removal
+                                // from truncating static files while we read from them.
+                                let block_removal_lock = self.block_removal_lock.clone();
+                                let _read_guard = block_removal_lock.read();
                                 let mut output = self.on_forkchoice_updated(state, payload_attrs);
 
                                 if let Ok(res) = &mut output {
@@ -1611,6 +1624,10 @@ where
                                 let start = Instant::now();
                                 let gas_used = payload.gas_used();
                                 let num_hash = payload.num_hash();
+                                // Hold a read guard to prevent concurrent block removal
+                                // from truncating static files while we read from them.
+                                let block_removal_lock = self.block_removal_lock.clone();
+                                let _read_guard = block_removal_lock.read();
                                 let mut output = self.on_new_payload(payload);
                                 self.metrics.engine.new_payload.update_response_metrics(
                                     start,

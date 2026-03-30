@@ -103,7 +103,8 @@ where
             ctx.task_executor().clone(),
             payload_job_config,
             payload_builder,
-        );
+        )
+        .with_block_removal_lock(ctx.block_removal_lock());
         let (payload_service, payload_service_handle) =
             PayloadBuilderService::new(payload_generator, ctx.provider().canonical_state_stream());
 
