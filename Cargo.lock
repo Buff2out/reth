@@ -10559,6 +10559,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "crossbeam-channel",
+ "crossbeam-utils",
  "derive_more",
  "itertools 0.14.0",
  "metrics",
