@@ -405,10 +405,12 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
 
     /// Takes the queued changeset prune strategy, returning the target block number if one was
     /// queued. Only meaningful for changeset segment writers.
-    fn take_changeset_prune(&mut self) -> Option<BlockNumber> {
+    const fn take_changeset_prune(&mut self) -> Option<BlockNumber> {
         match self.prune_on_commit.take() {
-            Some(PruneStrategy::AccountChangeSets { last_block }) |
-            Some(PruneStrategy::StorageChangeSets { last_block }) => Some(last_block),
+            Some(
+                PruneStrategy::AccountChangeSets { last_block } |
+                PruneStrategy::StorageChangeSets { last_block },
+            ) => Some(last_block),
             other => {
                 // Put it back if it wasn't a changeset prune
                 self.prune_on_commit = other;
