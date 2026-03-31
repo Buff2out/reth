@@ -218,7 +218,7 @@ where
     /// storage trie eviction, or capacity shrinking, keeping the full cache intact for
     /// benchmarking purposes.
     pub(super) fn into_trie_for_reuse(
-        self,
+        mut self,
         max_hot_slots: usize,
         max_hot_accounts: usize,
         max_nodes_capacity: usize,
@@ -226,6 +226,11 @@ where
         disable_pruning: bool,
         updates: &TrieUpdates,
     ) -> (SparseStateTrie<A, S>, DeferredDrops) {
+        // Final storage-root publication only matters for the next payload's reuse path, so do it
+        // here after the state root result has already been sent instead of keeping it on the
+        // current newPayload critical path.
+        self.publish_final_storage_roots();
+
         let Self { mut trie, .. } = self;
         trie.commit_updates(updates);
         if !disable_pruning {
@@ -371,7 +376,6 @@ where
             self.trie.root_with_updates(&self.proof_worker_handle).map_err(|e| {
                 ParallelStateRootError::Other(format!("could not calculate state root: {e:?}"))
             })?;
-        self.publish_final_storage_roots();
 
         #[cfg(feature = "trie-debug")]
         let debug_recorders = self.trie.take_debug_recorders();
@@ -502,10 +506,19 @@ where
 
     fn publish_final_storage_roots(&mut self) {
         let dirty_accounts = self.storage_root_dirty_accounts.drain().collect::<Vec<_>>();
+        let dirty_accounts_len = dirty_accounts.len();
+        let start = Instant::now();
+        let mut roots_written = 0usize;
+
         for address in dirty_accounts {
             let root = self.trie.storage_root(&address).unwrap_or(EMPTY_ROOT_HASH);
             self.storage_root_cache.insert(address, root);
+            roots_written += 1;
         }
+
+        self.metrics.publish_final_storage_roots_duration_histogram.record(start.elapsed());
+        self.metrics.publish_final_storage_roots_dirty_accounts.record(dirty_accounts_len as f64);
+        self.metrics.publish_final_storage_roots_roots_written.record(roots_written as f64);
     }
 
     fn process_new_updates(&mut self) -> SparseTrieResult<()> {

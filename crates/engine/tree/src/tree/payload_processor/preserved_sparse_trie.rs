@@ -1,5 +1,6 @@
 //! Preserved state-root assets for reuse across payload validations.
 
+use super::multiproof::MultiProofTaskMetrics;
 use alloy_primitives::B256;
 use parking_lot::Mutex;
 use reth_primitives_traits::{dashmap::DashMap, FastInstant as Instant};
@@ -119,11 +120,16 @@ impl PreservedStateRootAssets {
     /// If the preserved assets are anchored and the parent state root matches, the pruned trie and
     /// cached storage roots are reused directly. Otherwise, both are cleared but allocations are
     /// preserved to reduce memory overhead.
-    pub(super) fn into_parts_for(self, parent_state_root: B256) -> (SparseTrie, StorageRootCache) {
+    pub(super) fn into_parts_for(
+        self,
+        parent_state_root: B256,
+        metrics: &MultiProofTaskMetrics,
+    ) -> (SparseTrie, StorageRootCache) {
         match self {
             Self::Anchored { trie, storage_root_cache, state_root }
                 if state_root == parent_state_root =>
             {
+                metrics.state_root_assets_anchor_reuse_count.increment(1);
                 debug!(
                     target: "engine::tree::payload_processor",
                     %state_root,
@@ -132,6 +138,7 @@ impl PreservedStateRootAssets {
                 (trie, storage_root_cache)
             }
             Self::Anchored { mut trie, storage_root_cache, state_root } => {
+                metrics.state_root_assets_anchor_mismatch_count.increment(1);
                 debug!(
                     target: "engine::tree::payload_processor",
                     anchor_root = %state_root,
@@ -183,7 +190,8 @@ mod tests {
             state_root,
         );
 
-        let (_, reused_cache) = assets.into_parts_for(state_root);
+        let (_, reused_cache) =
+            assets.into_parts_for(state_root, &MultiProofTaskMetrics::default());
         assert!(Arc::ptr_eq(&reused_cache, &storage_root_cache));
         assert_eq!(reused_cache.get(&account).as_deref().copied(), Some(root));
     }
@@ -199,7 +207,8 @@ mod tests {
             B256::with_last_byte(1),
         );
 
-        let (_, reused_cache) = assets.into_parts_for(B256::with_last_byte(9));
+        let (_, reused_cache) =
+            assets.into_parts_for(B256::with_last_byte(9), &MultiProofTaskMetrics::default());
         assert!(Arc::ptr_eq(&reused_cache, &storage_root_cache));
         assert!(reused_cache.is_empty());
     }

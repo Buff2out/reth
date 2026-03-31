@@ -350,8 +350,9 @@ where
             .sparse_trie_cache_wait_duration_histogram
             .record(start.elapsed().as_secs_f64());
 
-        let (sparse_state_trie, storage_root_cache) =
-            preserved.map(|assets| assets.into_parts_for(parent_state_root)).unwrap_or_else(|| {
+        let (sparse_state_trie, storage_root_cache) = preserved
+            .map(|assets| assets.into_parts_for(parent_state_root, &self.trie_metrics))
+            .unwrap_or_else(|| {
                 debug!(
                     target: "engine::tree::payload_processor",
                     "Creating new state-root assets - no preserved assets available"

@@ -1,6 +1,6 @@
 //! Multiproof task related functionality.
 
-use metrics::{Gauge, Histogram};
+use metrics::{Counter, Gauge, Histogram};
 use reth_metrics::Metrics;
 
 pub use reth_trie_parallel::state_root_task::{
@@ -31,6 +31,8 @@ pub(crate) struct MultiProofTaskMetrics {
     pub into_trie_for_reuse_duration_histogram: Histogram,
     /// Time spent waiting for preserved sparse trie cache to become available.
     pub sparse_trie_cache_wait_duration_histogram: Histogram,
+    /// Histogram of durations spent publishing final storage roots into the preserved cache.
+    pub publish_final_storage_roots_duration_histogram: Histogram,
     /// Histogram for sparse trie task idle time in seconds (waiting for updates or proof
     /// results). Excludes the final wait after the channel is closed.
     pub sparse_trie_idle_time_seconds: Histogram,
@@ -46,11 +48,20 @@ pub(crate) struct MultiProofTaskMetrics {
     pub sparse_trie_storage_cache_hits: Histogram,
     /// Number of storage leaf updates that required a new proof (cache misses).
     pub sparse_trie_storage_cache_misses: Histogram,
+    /// Number of accounts whose final storage roots were published into the preserved cache.
+    pub publish_final_storage_roots_dirty_accounts: Histogram,
+    /// Number of storage roots written into the preserved cache during final publication.
+    pub publish_final_storage_roots_roots_written: Histogram,
 
     /// Retained memory of the preserved sparse trie cache in bytes.
     pub sparse_trie_retained_memory_bytes: Gauge,
     /// Number of storage tries retained in the preserved sparse trie cache.
     pub sparse_trie_retained_storage_tries: Gauge,
+    /// Number of times anchored preserved assets were reused for a continuation payload.
+    pub state_root_assets_anchor_reuse_count: Counter,
+    /// Number of times anchored preserved assets were cleared because the parent state root did
+    /// not match the anchor.
+    pub state_root_assets_anchor_mismatch_count: Counter,
 }
 
 /// Dispatches work items as a single unit or in chunks based on target size and worker
