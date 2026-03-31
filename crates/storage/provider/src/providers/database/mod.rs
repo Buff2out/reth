@@ -1,7 +1,7 @@
 use crate::{
     providers::{
         state::latest::LatestStateProvider, NodeTypesForProvider, RocksDBProvider,
-        RocksReadSnapshot, StaticFileProvider, StaticFileProviderRWRefMut,
+        StaticFileProvider, StaticFileProviderRWRefMut,
     },
     to_range,
     traits::{BlockSource, ReceiptProvider},
@@ -239,29 +239,6 @@ impl<N: ProviderNodeTypes<DB = DatabaseEnv>> ProviderFactory<N> {
 }
 
 impl<N: ProviderNodeTypes> ProviderFactory<N> {
-    fn provider_read_view(
-        &self,
-    ) -> ProviderResult<(<N::DB as Database>::TX, Option<RocksReadSnapshot>)> {
-        if !self.cached_storage_settings().storage_v2 {
-            return Ok((self.db.tx()?, None));
-        }
-
-        loop {
-            let txnid_before = self.db.last_txnid();
-            let tx = self.db.tx()?;
-            let snapshot = self.rocksdb_provider.snapshot();
-
-            if self.db.last_txnid() == txnid_before {
-                return Ok((tx, Some(snapshot)));
-            }
-
-            tracing::debug!(
-                target: "providers::db",
-                "MDBX write commit detected while pinning RocksDB snapshot, retrying"
-            );
-        }
-    }
-
     /// Returns a provider with a created `DbTx` inside, which allows fetching data from the
     /// database using different types of providers. Example: [`HeaderProvider`]
     /// [`BlockHashReader`]. This may fail if the inner read database transaction fails to open.
@@ -270,10 +247,8 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     /// data.
     #[track_caller]
     pub fn provider(&self) -> ProviderResult<DatabaseProviderRO<N::DB, N>> {
-        let (tx, pinned_rocksdb_snapshot) = self.provider_read_view()?;
-
-        let mut provider = DatabaseProvider::new(
-            tx,
+        Ok(DatabaseProvider::new(
+            self.db.tx()?,
             self.chain_spec.clone(),
             self.static_file_provider.clone(),
             self.prune_modes.clone(),
@@ -284,13 +259,7 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             self.runtime.clone(),
             self.db.path(),
         )
-        .with_minimum_pruning_distance(self.minimum_pruning_distance);
-
-        if let Some(snapshot) = pinned_rocksdb_snapshot {
-            provider = provider.with_pinned_rocksdb_snapshot(snapshot);
-        }
-
-        Ok(provider)
+        .with_minimum_pruning_distance(self.minimum_pruning_distance))
     }
 
     /// Returns a provider with a created `DbTxMut` inside, which allows fetching and updating
@@ -888,22 +857,21 @@ impl<N: NodeTypesWithDB> Clone for ProviderFactory<N> {
 mod tests {
     use super::*;
     use crate::{
-        providers::{HistoryInfo, StaticFileProvider, StaticFileWriter},
+        providers::{StaticFileProvider, StaticFileWriter},
         test_utils::{blocks::TEST_BLOCK, create_test_provider_factory, MockNodeTypesWithDB},
         BlockHashReader, BlockNumReader, BlockWriter, DBProvider, HeaderSyncGapProvider,
-        RocksDBProviderFactory, TransactionsProvider,
+        TransactionsProvider,
     };
-    use alloy_primitives::{Address, TxNumber, B256};
+    use alloy_primitives::{TxNumber, B256};
     use assert_matches::assert_matches;
     use reth_chainspec::ChainSpecBuilder;
     use reth_db::{
         mdbx::DatabaseArguments,
         test_utils::{create_test_rocksdb_dir, create_test_static_files_dir, ERROR_TEMPDIR},
     };
-    use reth_db_api::{models::StorageSettings, tables};
+    use reth_db_api::tables;
     use reth_primitives_traits::SignerRecoverable;
     use reth_prune_types::{PruneMode, PruneModes};
-    use reth_storage_api::StorageSettingsCache;
     use reth_storage_errors::provider::ProviderError;
     use reth_testing_utils::generators::{self, random_block, random_header, BlockParams};
     use std::{ops::RangeInclusive, sync::Arc};
@@ -932,38 +900,6 @@ mod tests {
         let provider_rw = factory.provider_rw().unwrap();
         provider_rw.block_hash(0).unwrap();
         provider.block_hash(0).unwrap();
-    }
-
-    #[test]
-    fn provider_pins_rocksdb_snapshot_for_storage_v2() {
-        let factory = create_test_provider_factory();
-        factory.set_storage_settings_cache(StorageSettings::v2());
-
-        let address = Address::from([0x42; 20]);
-        let rocksdb = factory.rocksdb_provider();
-
-        let mut batch = rocksdb.batch();
-        batch.append_account_history_shard(address, vec![100]).unwrap();
-        batch.commit().unwrap();
-
-        let provider = factory.provider().unwrap();
-
-        let mut batch = rocksdb.batch();
-        batch.append_account_history_shard(address, vec![200]).unwrap();
-        batch.commit().unwrap();
-
-        assert_eq!(
-            provider
-                .pinned_rocksdb_snapshot()
-                .expect("storage_v2 providers pin a RocksDB snapshot")
-                .account_history_info(address, 150, None)
-                .unwrap(),
-            HistoryInfo::InPlainState
-        );
-        assert_eq!(
-            rocksdb.snapshot().account_history_info(address, 150, None).unwrap(),
-            HistoryInfo::InChangeset(200)
-        );
     }
 
     #[test]

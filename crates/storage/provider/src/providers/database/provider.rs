@@ -2,7 +2,7 @@ use crate::{
     changesets_utils::StorageRevertsIter,
     providers::{
         database::{chain::ChainStorage, metrics},
-        rocksdb::{PendingRocksDBBatches, RocksDBProvider, RocksDBWriteCtx, RocksReadSnapshot},
+        rocksdb::{PendingRocksDBBatches, RocksDBProvider, RocksDBWriteCtx},
         static_file::{StaticFileWriteCtx, StaticFileWriter},
         NodeTypesForProvider, StaticFileProvider,
     },
@@ -212,8 +212,6 @@ pub struct DatabaseProvider<TX, N: NodeTypes> {
     minimum_pruning_distance: u64,
     /// Database provider metrics
     metrics: metrics::DatabaseProviderMetrics,
-    /// Pinned RocksDB snapshot taken alongside the MDBX read transaction.
-    pinned_rocksdb_snapshot: Option<RocksReadSnapshot>,
 }
 
 impl<TX: Debug, N: NodeTypes> Debug for DatabaseProvider<TX, N> {
@@ -231,7 +229,6 @@ impl<TX: Debug, N: NodeTypes> Debug for DatabaseProvider<TX, N> {
             .field("pending_rocksdb_batches", &"<pending batches>")
             .field("commit_order", &self.commit_order)
             .field("minimum_pruning_distance", &self.minimum_pruning_distance)
-            .field("pinned_rocksdb_snapshot", &self.pinned_rocksdb_snapshot)
             .finish()
     }
 }
@@ -246,19 +243,6 @@ impl<TX, N: NodeTypes> DatabaseProvider<TX, N> {
     pub const fn with_minimum_pruning_distance(mut self, distance: u64) -> Self {
         self.minimum_pruning_distance = distance;
         self
-    }
-
-    pub(crate) fn with_pinned_rocksdb_snapshot(mut self, snapshot: RocksReadSnapshot) -> Self {
-        self.pinned_rocksdb_snapshot = Some(snapshot);
-        self
-    }
-
-    pub(crate) fn pinned_rocksdb_snapshot(&self) -> Option<&RocksReadSnapshot> {
-        self.pinned_rocksdb_snapshot.as_ref()
-    }
-
-    fn take_pinned_rocksdb_snapshot(&mut self) -> Option<RocksReadSnapshot> {
-        self.pinned_rocksdb_snapshot.take()
     }
 }
 
@@ -291,9 +275,6 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
             self.get_prune_checkpoint(PruneSegment::StorageHistory)?;
 
         let mut state_provider = HistoricalStateProviderRef::new(self, block_number);
-        if let Some(snapshot) = self.pinned_rocksdb_snapshot() {
-            state_provider = state_provider.with_pinned_rocksdb_snapshot(snapshot);
-        }
 
         // If we pruned account or storage history, we can't return state on every historical block.
         // Instead, we should cap it at the latest prune checkpoint for corresponding prune segment.
@@ -401,7 +382,6 @@ impl<TX: DbTxMut, N: NodeTypes> DatabaseProvider<TX, N> {
             commit_order,
             minimum_pruning_distance: MINIMUM_UNWIND_SAFE_DISTANCE,
             metrics: metrics::DatabaseProviderMetrics::default(),
-            pinned_rocksdb_snapshot: None,
         }
     }
 
@@ -888,8 +868,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
         self,
         mut block_number: BlockNumber,
     ) -> ProviderResult<StateProviderBox> {
-        let mut provider = self;
-        let best_block = provider.best_block_number().unwrap_or_default();
+        let best_block = self.best_block_number().unwrap_or_default();
 
         // Reject requests for blocks beyond the best block
         if block_number > best_block {
@@ -901,23 +880,18 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
 
         // If requesting state at the best block, use the latest state provider
         if block_number == best_block {
-            return Ok(Box::new(LatestStateProvider::new(provider)));
+            return Ok(Box::new(LatestStateProvider::new(self)));
         }
 
         // +1 as the changeset that we want is the one that was applied after this block.
         block_number += 1;
 
         let account_history_prune_checkpoint =
-            provider.get_prune_checkpoint(PruneSegment::AccountHistory)?;
+            self.get_prune_checkpoint(PruneSegment::AccountHistory)?;
         let storage_history_prune_checkpoint =
-            provider.get_prune_checkpoint(PruneSegment::StorageHistory)?;
+            self.get_prune_checkpoint(PruneSegment::StorageHistory)?;
 
-        let pinned_rocksdb_snapshot = provider.take_pinned_rocksdb_snapshot();
-
-        let mut state_provider = HistoricalStateProvider::new(provider, block_number);
-        if let Some(snapshot) = pinned_rocksdb_snapshot {
-            state_provider = state_provider.with_pinned_rocksdb_snapshot(snapshot);
-        }
+        let mut state_provider = HistoricalStateProvider::new(self, block_number);
 
         // If we pruned account or storage history, we can't return state on every historical block.
         // Instead, we should cap it at the latest prune checkpoint for corresponding prune segment.
@@ -1033,7 +1007,6 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
             commit_order: CommitOrder::Normal,
             minimum_pruning_distance: MINIMUM_UNWIND_SAFE_DISTANCE,
             metrics: metrics::DatabaseProviderMetrics::default(),
-            pinned_rocksdb_snapshot: None,
         }
     }
 

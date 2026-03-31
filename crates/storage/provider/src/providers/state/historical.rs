@@ -1,7 +1,6 @@
 use crate::{
-    providers::RocksReadSnapshot, AccountReader, BlockHashReader, ChangeSetReader, EitherReader,
-    HashedPostStateProvider, ProviderError, RocksDBProviderFactory, StateProvider,
-    StateRootProvider,
+    AccountReader, BlockHashReader, ChangeSetReader, EitherReader, HashedPostStateProvider,
+    ProviderError, RocksDBProviderFactory, StateProvider, StateRootProvider,
 };
 use alloy_eips::merge::EPOCH_SLOTS;
 use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
@@ -128,8 +127,6 @@ pub struct HistoricalStateProviderRef<'b, Provider> {
     block_number: BlockNumber,
     /// Lowest blocks at which different parts of the state are available.
     lowest_available_blocks: LowestAvailableBlocks,
-    /// Pinned RocksDB snapshot taken alongside the MDBX read transaction.
-    pinned_rocksdb_snapshot: Option<&'b RocksReadSnapshot>,
 }
 
 impl<'b, Provider: DBProvider + ChangeSetReader + StorageChangeSetReader + BlockNumReader>
@@ -137,12 +134,7 @@ impl<'b, Provider: DBProvider + ChangeSetReader + StorageChangeSetReader + Block
 {
     /// Create new `StateProvider` for historical block number
     pub fn new(provider: &'b Provider, block_number: BlockNumber) -> Self {
-        Self {
-            provider,
-            block_number,
-            lowest_available_blocks: Default::default(),
-            pinned_rocksdb_snapshot: None,
-        }
+        Self { provider, block_number, lowest_available_blocks: Default::default() }
     }
 
     /// Create new `StateProvider` for historical block number and lowest block numbers at which
@@ -152,12 +144,7 @@ impl<'b, Provider: DBProvider + ChangeSetReader + StorageChangeSetReader + Block
         block_number: BlockNumber,
         lowest_available_blocks: LowestAvailableBlocks,
     ) -> Self {
-        Self { provider, block_number, lowest_available_blocks, pinned_rocksdb_snapshot: None }
-    }
-
-    pub(crate) fn with_pinned_rocksdb_snapshot(mut self, snapshot: &'b RocksReadSnapshot) -> Self {
-        self.pinned_rocksdb_snapshot = Some(snapshot);
-        self
+        Self { provider, block_number, lowest_available_blocks }
     }
 
     /// Lookup an account in the `AccountsHistory` table using `EitherReader`.
@@ -167,14 +154,6 @@ impl<'b, Provider: DBProvider + ChangeSetReader + StorageChangeSetReader + Block
     {
         if !self.lowest_available_blocks.is_account_history_available(self.block_number) {
             return Err(ProviderError::StateAtBlockPruned(self.block_number))
-        }
-
-        if let Some(snapshot) = self.pinned_rocksdb_snapshot {
-            return snapshot.account_history_info(
-                address,
-                self.block_number,
-                self.lowest_available_blocks.account_history_block_number,
-            )
         }
 
         self.provider.with_rocksdb_snapshot(|rocksdb_ref| {
@@ -200,15 +179,6 @@ impl<'b, Provider: DBProvider + ChangeSetReader + StorageChangeSetReader + Block
     {
         if !self.lowest_available_blocks.is_storage_history_available(self.block_number) {
             return Err(ProviderError::StateAtBlockPruned(self.block_number))
-        }
-
-        if let Some(snapshot) = self.pinned_rocksdb_snapshot {
-            return snapshot.storage_history_info(
-                address,
-                lookup_key,
-                self.block_number,
-                self.lowest_available_blocks.storage_history_block_number,
-            )
         }
 
         self.provider.with_rocksdb_snapshot(|rocksdb_ref| {
@@ -619,8 +589,6 @@ pub struct HistoricalStateProvider<Provider> {
     block_number: BlockNumber,
     /// Lowest blocks at which different parts of the state are available.
     lowest_available_blocks: LowestAvailableBlocks,
-    /// Pinned RocksDB snapshot taken alongside the MDBX read transaction.
-    pinned_rocksdb_snapshot: Option<RocksReadSnapshot>,
 }
 
 impl<Provider: DBProvider + ChangeSetReader + StorageChangeSetReader + BlockNumReader>
@@ -628,17 +596,7 @@ impl<Provider: DBProvider + ChangeSetReader + StorageChangeSetReader + BlockNumR
 {
     /// Create new `StateProvider` for historical block number
     pub fn new(provider: Provider, block_number: BlockNumber) -> Self {
-        Self {
-            provider,
-            block_number,
-            lowest_available_blocks: Default::default(),
-            pinned_rocksdb_snapshot: None,
-        }
-    }
-
-    pub(crate) fn with_pinned_rocksdb_snapshot(mut self, snapshot: RocksReadSnapshot) -> Self {
-        self.pinned_rocksdb_snapshot = Some(snapshot);
-        self
+        Self { provider, block_number, lowest_available_blocks: Default::default() }
     }
 
     /// Set the lowest block number at which the account history is available.
@@ -661,18 +619,12 @@ impl<Provider: DBProvider + ChangeSetReader + StorageChangeSetReader + BlockNumR
 
     /// Returns a new provider that takes the `TX` as reference
     #[inline(always)]
-    fn as_ref(&self) -> HistoricalStateProviderRef<'_, Provider> {
-        let provider = HistoricalStateProviderRef::new_with_lowest_available_blocks(
+    const fn as_ref(&self) -> HistoricalStateProviderRef<'_, Provider> {
+        HistoricalStateProviderRef::new_with_lowest_available_blocks(
             &self.provider,
             self.block_number,
             self.lowest_available_blocks,
-        );
-
-        if let Some(snapshot) = self.pinned_rocksdb_snapshot.as_ref() {
-            provider.with_pinned_rocksdb_snapshot(snapshot)
-        } else {
-            provider
-        }
+        )
     }
 }
 

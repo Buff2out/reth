@@ -72,7 +72,7 @@ pub type RawRocksDBBatch = rocksdb::WriteBatchWithTransaction<true>;
 ///
 /// The `Option` allows callers to skip `RocksDB` access when it isn't needed
 /// (e.g., on legacy MDBX-only nodes).
-pub type RocksDBRefArg = Option<crate::providers::rocksdb::RocksReadSnapshot>;
+pub type RocksDBRefArg<'a> = Option<crate::providers::rocksdb::RocksReadSnapshot<'a>>;
 
 /// Represents a destination for writing data, either to database, static files, or `RocksDB`.
 #[derive(Debug, Display)]
@@ -673,7 +673,7 @@ pub enum EitherReader<'a, CURSOR, N> {
     /// Read from static file
     StaticFile(StaticFileProvider<N>, PhantomData<&'a ()>),
     /// Read from `RocksDB` snapshot (works in both read-only and read-write modes)
-    RocksDB(crate::providers::rocksdb::RocksReadSnapshot),
+    RocksDB(crate::providers::rocksdb::RocksReadSnapshot<'a>),
 }
 
 impl<'a> EitherReader<'a, (), ()> {
@@ -698,7 +698,7 @@ impl<'a> EitherReader<'a, (), ()> {
     /// Creates a new [`EitherReader`] for storages history based on storage settings.
     pub fn new_storages_history<P>(
         provider: &P,
-        rocksdb: RocksDBRefArg,
+        rocksdb: RocksDBRefArg<'a>,
     ) -> ProviderResult<EitherReaderTy<'a, P, tables::StoragesHistory>>
     where
         P: DBProvider + NodePrimitivesProvider + StorageSettingsCache,
@@ -719,7 +719,7 @@ impl<'a> EitherReader<'a, (), ()> {
     /// Creates a new [`EitherReader`] for transaction hash numbers based on storage settings.
     pub fn new_transaction_hash_numbers<P>(
         provider: &P,
-        rocksdb: RocksDBRefArg,
+        rocksdb: RocksDBRefArg<'a>,
     ) -> ProviderResult<EitherReaderTy<'a, P, tables::TransactionHashNumbers>>
     where
         P: DBProvider + NodePrimitivesProvider + StorageSettingsCache,
@@ -740,7 +740,7 @@ impl<'a> EitherReader<'a, (), ()> {
     /// Creates a new [`EitherReader`] for account history based on storage settings.
     pub fn new_accounts_history<P>(
         provider: &P,
-        rocksdb: RocksDBRefArg,
+        rocksdb: RocksDBRefArg<'a>,
     ) -> ProviderResult<EitherReaderTy<'a, P, tables::AccountsHistory>>
     where
         P: DBProvider + NodePrimitivesProvider + StorageSettingsCache,
