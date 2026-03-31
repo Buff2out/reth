@@ -61,17 +61,14 @@ pub(crate) fn dispatch_with_chunking<T, I>(
     chunking_len: usize,
     chunk_size: usize,
     max_targets_for_chunking: usize,
-    has_multiple_idle_account_workers: bool,
-    has_multiple_idle_storage_workers: bool,
+    has_spare_workers: impl FnOnce() -> bool,
     chunker: impl FnOnce(T, usize) -> I,
     mut dispatch: impl FnMut(T),
 ) -> usize
 where
     I: IntoIterator<Item = T>,
 {
-    let should_chunk = chunking_len > max_targets_for_chunking ||
-        has_multiple_idle_account_workers ||
-        has_multiple_idle_storage_workers;
+    let should_chunk = chunking_len > max_targets_for_chunking || has_spare_workers();
 
     if should_chunk && chunking_len > chunk_size {
         let mut num_chunks = 0usize;
