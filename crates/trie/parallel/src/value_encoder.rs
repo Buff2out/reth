@@ -213,8 +213,11 @@ where
 pub(crate) struct AsyncAccountValueEncoder<TC, HC> {
     /// Storage proof jobs which were dispatched ahead of time.
     dispatched: B256Map<CrossbeamReceiver<StorageProofResultMessage>>,
-    /// Storage roots which have already been computed. This can be used only if a storage proof
-    /// wasn't dispatched for an account, otherwise we must consume the proof result.
+    /// Storage roots which have already been computed.
+    ///
+    /// If a proof was also dispatched for an account, the cached root can still be used to encode
+    /// the account leaf immediately; the proof result is collected later in `finalize` so the
+    /// multiproof nodes are not lost.
     cached_storage_roots: Arc<DashMap<B256, B256>>,
     /// Tracks storage proof results received from the storage workers. [`Rc`] + [`RefCell`] is
     /// required because [`DeferredValueEncoder`] cannot have a lifetime.
@@ -302,6 +305,14 @@ where
         hashed_address: B256,
         account: Self::Value,
     ) -> Self::DeferredEncoder {
+        // If the root is already cached, we can encode the account leaf immediately without
+        // blocking on a pre-dispatched storage proof. If a receiver is still queued for this
+        // account, `finalize` will collect its proof nodes later.
+        if let Some(root) = self.cached_storage_roots.get(&hashed_address) {
+            self.stats.borrow_mut().from_cache_count += 1;
+            return AsyncAccountDeferredValueEncoder::FromCache { account, root: *root }
+        }
+
         // If the proof job has already been dispatched for this account then it's not necessary to
         // dispatch another.
         if let Some(rx) = self.dispatched.remove(&hashed_address) {
@@ -320,12 +331,6 @@ where
         // If the address didn't have a job dispatched for it then we can assume it has no targets,
         // and we only need its root.
 
-        // If the root is already calculated then just use it directly
-        if let Some(root) = self.cached_storage_roots.get(&hashed_address) {
-            self.stats.borrow_mut().from_cache_count += 1;
-            return AsyncAccountDeferredValueEncoder::FromCache { account, root: *root }
-        }
-
         // Compute storage root synchronously using the shared calculator
         self.stats.borrow_mut().sync_count += 1;
         AsyncAccountDeferredValueEncoder::Sync {
@@ -334,5 +339,72 @@ where
             account,
             cached_storage_roots: self.cached_storage_roots.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{map::B256Map, U256};
+    use reth_trie::{
+        hashed_cursor::{mock::MockHashedCursorFactory, HashedCursorFactory},
+        proof_v2::{LeafValueEncoder, StorageProofCalculator},
+        trie_cursor::{mock::MockTrieCursorFactory, TrieCursorFactory},
+    };
+    use std::collections::BTreeMap;
+
+    fn storage_calculator(
+        hashed_address: B256,
+    ) -> Rc<
+        RefCell<
+            StorageProofCalculator<
+                <MockTrieCursorFactory as TrieCursorFactory>::StorageTrieCursor<'static>,
+                <MockHashedCursorFactory as HashedCursorFactory>::StorageCursor<'static>,
+            >,
+        >,
+    > {
+        let mut storage_trie_nodes = B256Map::default();
+        storage_trie_nodes.insert(hashed_address, BTreeMap::new());
+        let trie_factory = MockTrieCursorFactory::new(BTreeMap::new(), storage_trie_nodes);
+
+        let mut hashed_storage = B256Map::default();
+        hashed_storage.insert(hashed_address, BTreeMap::<B256, U256>::new());
+        let hashed_factory = MockHashedCursorFactory::new(BTreeMap::new(), hashed_storage);
+
+        Rc::new(RefCell::new(StorageProofCalculator::new_storage(
+            trie_factory.storage_trie_cursor(hashed_address).unwrap(),
+            hashed_factory.hashed_storage_cursor(hashed_address).unwrap(),
+        )))
+    }
+
+    #[test]
+    fn uses_cached_root_even_when_storage_proof_was_pre_dispatched() {
+        let hashed_address = B256::with_last_byte(1);
+        let cached_root = B256::with_last_byte(2);
+
+        let (result_tx, result_rx) = crossbeam_channel::unbounded::<StorageProofResultMessage>();
+        drop(result_tx);
+
+        let mut dispatched = B256Map::default();
+        dispatched.insert(hashed_address, result_rx);
+
+        let cached_storage_roots = Arc::<DashMap<_, _>>::default();
+        cached_storage_roots.insert(hashed_address, cached_root);
+
+        let mut encoder = AsyncAccountValueEncoder::new(
+            dispatched,
+            cached_storage_roots,
+            storage_calculator(hashed_address),
+        );
+
+        let account = Account { nonce: 7, ..Default::default() };
+        let mut encoded = Vec::new();
+        encoder.deferred_encoder(hashed_address, account).encode(&mut encoded).unwrap();
+
+        assert_eq!(encoded, alloy_rlp::encode(account.into_trie_account(cached_root)));
+
+        // The receiver is intentionally left queued so finalize can still collect proof nodes.
+        // With the old ordering, encode() would have blocked on the closed channel instead.
+        assert!(encoder.finalize().is_err());
     }
 }
