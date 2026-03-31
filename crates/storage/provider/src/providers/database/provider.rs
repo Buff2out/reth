@@ -2,7 +2,9 @@ use crate::{
     changesets_utils::StorageRevertsIter,
     providers::{
         database::{chain::ChainStorage, metrics},
-        rocksdb::{PendingRocksDBBatches, RocksDBProvider, RocksDBWriteCtx},
+        rocksdb::{
+            OwnedRocksReadSnapshot, PendingRocksDBBatches, RocksDBProvider, RocksDBWriteCtx,
+        },
         static_file::{StaticFileWriteCtx, StaticFileWriter},
         NodeTypesForProvider, StaticFileProvider,
     },
@@ -212,6 +214,10 @@ pub struct DatabaseProvider<TX, N: NodeTypes> {
     minimum_pruning_distance: u64,
     /// Database provider metrics
     metrics: metrics::DatabaseProviderMetrics,
+    /// Pinned RocksDB snapshot for cross-store read consistency.
+    /// When set, `HistoricalStateProvider` uses this instead of creating per-query snapshots.
+    /// This ensures the RocksDB view is consistent with the MDBX read transaction.
+    pinned_rocksdb_snapshot: Option<Arc<OwnedRocksReadSnapshot>>,
 }
 
 impl<TX: Debug, N: NodeTypes> Debug for DatabaseProvider<TX, N> {
@@ -229,6 +235,7 @@ impl<TX: Debug, N: NodeTypes> Debug for DatabaseProvider<TX, N> {
             .field("pending_rocksdb_batches", &"<pending batches>")
             .field("commit_order", &self.commit_order)
             .field("minimum_pruning_distance", &self.minimum_pruning_distance)
+            .field("pinned_rocksdb_snapshot", &self.pinned_rocksdb_snapshot)
             .finish()
     }
 }
@@ -243,6 +250,17 @@ impl<TX, N: NodeTypes> DatabaseProvider<TX, N> {
     pub const fn with_minimum_pruning_distance(mut self, distance: u64) -> Self {
         self.minimum_pruning_distance = distance;
         self
+    }
+
+    /// Sets the pinned RocksDB snapshot for cross-store read consistency.
+    pub fn with_pinned_rocksdb_snapshot(mut self, snapshot: Arc<OwnedRocksReadSnapshot>) -> Self {
+        self.pinned_rocksdb_snapshot = Some(snapshot);
+        self
+    }
+
+    /// Returns the pinned RocksDB snapshot, if set.
+    pub fn pinned_rocksdb_snapshot(&self) -> Option<&Arc<OwnedRocksReadSnapshot>> {
+        self.pinned_rocksdb_snapshot.as_ref()
     }
 }
 
@@ -275,6 +293,10 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
             self.get_prune_checkpoint(PruneSegment::StorageHistory)?;
 
         let mut state_provider = HistoricalStateProviderRef::new(self, block_number);
+
+        if let Some(snapshot) = &self.pinned_rocksdb_snapshot {
+            state_provider.pinned_rocksdb_snapshot = Some(snapshot);
+        }
 
         // If we pruned account or storage history, we can't return state on every historical block.
         // Instead, we should cap it at the latest prune checkpoint for corresponding prune segment.
@@ -382,6 +404,7 @@ impl<TX: DbTxMut, N: NodeTypes> DatabaseProvider<TX, N> {
             commit_order,
             minimum_pruning_distance: MINIMUM_UNWIND_SAFE_DISTANCE,
             metrics: metrics::DatabaseProviderMetrics::default(),
+            pinned_rocksdb_snapshot: None,
         }
     }
 
@@ -890,8 +913,13 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
             self.get_prune_checkpoint(PruneSegment::AccountHistory)?;
         let storage_history_prune_checkpoint =
             self.get_prune_checkpoint(PruneSegment::StorageHistory)?;
+        let pinned_snapshot = self.pinned_rocksdb_snapshot.clone();
 
         let mut state_provider = HistoricalStateProvider::new(self, block_number);
+
+        if let Some(snapshot) = pinned_snapshot {
+            state_provider = state_provider.with_pinned_rocksdb_snapshot(snapshot);
+        }
 
         // If we pruned account or storage history, we can't return state on every historical block.
         // Instead, we should cap it at the latest prune checkpoint for corresponding prune segment.
@@ -1007,6 +1035,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
             commit_order: CommitOrder::Normal,
             minimum_pruning_distance: MINIMUM_UNWIND_SAFE_DISTANCE,
             metrics: metrics::DatabaseProviderMetrics::default(),
+            pinned_rocksdb_snapshot: None,
         }
     }
 

@@ -247,8 +247,32 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     /// data.
     #[track_caller]
     pub fn provider(&self) -> ProviderResult<DatabaseProviderRO<N::DB, N>> {
-        Ok(DatabaseProvider::new(
-            self.db.tx()?,
+        let storage_v2 = self.storage_settings.read().storage_v2;
+
+        // For storage_v2, we need consistent MDBX + RocksDB snapshots.
+        // Take both and verify no write commit landed between them.
+        let (tx, pinned_snapshot) = if storage_v2 {
+            loop {
+                let txnid_before = self.db.last_txnid();
+                let tx = self.db.tx()?;
+                let snapshot = Arc::new(self.rocksdb_provider.owned_snapshot());
+                let txnid_after = self.db.last_txnid();
+                if txnid_before == txnid_after {
+                    break (tx, Some(snapshot));
+                }
+                // A write commit landed between the two snapshots — retry.
+                // This is extremely rare (nanosecond window).
+                tracing::debug!(
+                    target: "providers::db",
+                    "MDBX write commit detected between read tx and RocksDB snapshot, retrying"
+                );
+            }
+        } else {
+            (self.db.tx()?, None)
+        };
+
+        let mut provider = DatabaseProvider::new(
+            tx,
             self.chain_spec.clone(),
             self.static_file_provider.clone(),
             self.prune_modes.clone(),
@@ -259,7 +283,13 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             self.runtime.clone(),
             self.db.path(),
         )
-        .with_minimum_pruning_distance(self.minimum_pruning_distance))
+        .with_minimum_pruning_distance(self.minimum_pruning_distance);
+
+        if let Some(snapshot) = pinned_snapshot {
+            provider = provider.with_pinned_rocksdb_snapshot(snapshot);
+        }
+
+        Ok(provider)
     }
 
     /// Returns a provider with a created `DbTxMut` inside, which allows fetching and updating
