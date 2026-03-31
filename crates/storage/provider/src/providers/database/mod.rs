@@ -278,7 +278,7 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     pub fn provider(&self) -> ProviderResult<DatabaseProviderRO<N::DB, N>> {
         let (tx, pinned_rocksdb_snapshot) = self.read_tx_and_rocksdb_snapshot()?;
 
-        let mut provider = DatabaseProvider::new(
+        let provider = DatabaseProvider::new(
             tx,
             self.chain_spec.clone(),
             self.static_file_provider.clone(),
@@ -292,11 +292,11 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
         )
         .with_minimum_pruning_distance(self.minimum_pruning_distance);
 
-        if let Some(snapshot) = pinned_rocksdb_snapshot {
-            provider = provider.with_pinned_rocksdb_snapshot(snapshot);
-        }
-
-        Ok(provider)
+        Ok(if let Some(snapshot) = pinned_rocksdb_snapshot {
+            provider.with_pinned_rocksdb_snapshot(snapshot)
+        } else {
+            provider
+        })
     }
 
     /// Returns a provider with a created `DbTxMut` inside, which allows fetching and updating
