@@ -367,7 +367,7 @@ where
             &self.executor,
             task_ctx,
             halve_workers,
-            storage_root_cache.clone(),
+            Arc::clone(&storage_root_cache),
         );
 
         let (state_root_tx, state_root_rx) = channel();

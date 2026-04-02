@@ -505,20 +505,20 @@ where
     }
 
     fn publish_final_storage_roots(&mut self) {
-        let dirty_accounts = self.storage_root_dirty_accounts.drain().collect::<Vec<_>>();
-        let dirty_accounts_len = dirty_accounts.len();
         let start = Instant::now();
-        let mut roots_written = 0usize;
+
+        let dirty_accounts = self.storage_root_dirty_accounts.drain();
+        let mut dirty_accounts_cnt = 0;
 
         for address in dirty_accounts {
-            let root = self.trie.storage_root(&address).unwrap_or(EMPTY_ROOT_HASH);
+            let root = self.trie.storage_root(&address)
+                .expect("storage root must've been revealed if it ended up in dirty accounts");
             self.storage_root_cache.insert(address, root);
-            roots_written += 1;
+            dirty_accounts_cnt += 1;
         }
 
         self.metrics.publish_final_storage_roots_duration_histogram.record(start.elapsed());
-        self.metrics.publish_final_storage_roots_dirty_accounts.record(dirty_accounts_len as f64);
-        self.metrics.publish_final_storage_roots_roots_written.record(roots_written as f64);
+        self.metrics.publish_final_storage_roots_dirty_accounts.record(dirty_accounts_cnt as f64);
     }
 
     fn process_new_updates(&mut self) -> SparseTrieResult<()> {

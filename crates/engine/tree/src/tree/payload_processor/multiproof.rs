@@ -48,10 +48,8 @@ pub(crate) struct MultiProofTaskMetrics {
     pub sparse_trie_storage_cache_hits: Histogram,
     /// Number of storage leaf updates that required a new proof (cache misses).
     pub sparse_trie_storage_cache_misses: Histogram,
-    /// Number of accounts whose final storage roots were published into the preserved cache.
+    /// Number of dirty accounts whose storage roots were published into the preserved cache.
     pub publish_final_storage_roots_dirty_accounts: Histogram,
-    /// Number of storage roots written into the preserved cache during final publication.
-    pub publish_final_storage_roots_roots_written: Histogram,
 
     /// Retained memory of the preserved sparse trie cache in bytes.
     pub sparse_trie_retained_memory_bytes: Gauge,
