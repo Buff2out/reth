@@ -512,10 +512,9 @@ where
         let mut dirty_accounts_cnt = 0;
 
         for address in dirty_accounts {
-            let root = self
-                .trie
-                .storage_root(&address)
-                .expect("storage root must've been revealed if it ended up in dirty accounts");
+            // Wiped/destroyed accounts can end the block with an empty storage root without ever
+            // materializing a revealed storage trie in the sparse cache.
+            let root = self.trie.storage_root(&address).unwrap_or(EMPTY_ROOT_HASH);
             self.storage_root_cache.insert(address, root);
             dirty_accounts_cnt += 1;
         }

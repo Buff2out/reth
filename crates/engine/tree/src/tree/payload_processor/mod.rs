@@ -976,7 +976,10 @@ mod tests {
     };
     use reth_revm::db::BundleState;
     use reth_testing_utils::generators;
-    use reth_trie::test_utils::{state_root, storage_root};
+    use reth_trie::{
+        test_utils::{state_root, storage_root},
+        EMPTY_ROOT_HASH,
+    };
     use reth_trie_db::ChangesetCache;
     use revm_primitives::{Address, HashMap, B256, KECCAK_EMPTY, U256};
     use revm_state::{AccountInfo, AccountStatus, EvmState, EvmStorageSlot};
@@ -1180,9 +1183,7 @@ mod tests {
     /// Seeds the database with the given state updates, spawns a payload processor,
     /// feeds the updates through the state hook, and returns the processor along with
     /// the computed state root.
-    fn process_state_updates(
-        state_updates: &[EvmState],
-    ) -> (PayloadProcessor<EthEvmConfig>, B256) {
+    fn process_state_updates(state_updates: &[EvmState]) -> (PayloadProcessor<EthEvmConfig>, B256) {
         let factory = create_test_provider_factory_with_chain_spec(Arc::new(ChainSpec::default()));
         let genesis_hash = init_genesis(&factory).unwrap();
 
@@ -1340,15 +1341,114 @@ mod tests {
             PreservedStateRootAssets::Anchored { storage_root_cache, .. } => {
                 for (address, _, slots) in &test_accounts {
                     let hashed_address = keccak256(address);
-                    let expected = storage_root(slots.iter().map(|(slot, value)| {
-                        (B256::from(slot.to_be_bytes::<32>()), *value)
-                    }));
+                    let expected = storage_root(
+                        slots
+                            .iter()
+                            .map(|(slot, value)| (B256::from(slot.to_be_bytes::<32>()), *value)),
+                    );
                     assert_eq!(
                         storage_root_cache.get(&hashed_address),
                         Some(expected),
                         "Storage root mismatch for {address}"
                     );
                 }
+            }
+            PreservedStateRootAssets::Cleared { .. } => {
+                panic!("expected anchored state-root assets")
+            }
+        }
+    }
+
+    #[test]
+    fn state_root_assets_publish_empty_storage_root_for_destroyed_account() {
+        reth_tracing::init_test_tracing();
+
+        let factory = create_test_provider_factory_with_chain_spec(Arc::new(ChainSpec::default()));
+        let genesis_hash = init_genesis(&factory).unwrap();
+
+        let address = Address::from([0x44; 20]);
+        let hashed_address = keccak256(address);
+        let slot = U256::from(1);
+        let value = U256::from(7);
+
+        {
+            let provider_rw = factory.provider_rw().expect("failed to get provider");
+            provider_rw
+                .insert_account_for_hashing([(
+                    address,
+                    Some(Account {
+                        nonce: 1,
+                        balance: U256::from(1),
+                        bytecode_hash: Some(KECCAK_EMPTY),
+                    }),
+                )])
+                .expect("failed to insert account");
+            provider_rw
+                .insert_storage_for_hashing([(
+                    address,
+                    [StorageEntry { key: B256::from(slot), value }],
+                )])
+                .expect("failed to insert storage");
+            provider_rw.commit().expect("failed to commit changes");
+        }
+
+        let update = EvmState::from_iter([(
+            address,
+            revm_state::Account {
+                info: AccountInfo {
+                    balance: U256::ZERO,
+                    nonce: 1,
+                    code_hash: KECCAK_EMPTY,
+                    code: Some(Default::default()),
+                    account_id: None,
+                },
+                original_info: Box::new(AccountInfo {
+                    balance: U256::from(1),
+                    nonce: 1,
+                    code_hash: KECCAK_EMPTY,
+                    code: Some(Default::default()),
+                    account_id: None,
+                }),
+                storage: HashMap::default(),
+                status: AccountStatus::Touched | AccountStatus::SelfDestructed,
+                transaction_id: 0,
+            },
+        )]);
+
+        let mut payload_processor = PayloadProcessor::new(
+            reth_tasks::Runtime::test(),
+            EthEvmConfig::new(factory.chain_spec()),
+            &TreeConfig::default(),
+            PrecompileCacheMap::default(),
+        );
+
+        let provider_factory = BlockchainProvider::new(factory).unwrap();
+        let mut handle = payload_processor.spawn(
+            ExecutionEnv::test_default(),
+            (
+                Vec::<Result<Recovered<TransactionSigned>, core::convert::Infallible>>::new(),
+                std::convert::identity,
+            ),
+            StateProviderBuilder::new(provider_factory.clone(), genesis_hash, None),
+            OverlayStateProviderFactory::new(provider_factory, ChangesetCache::new()),
+            &TreeConfig::default(),
+            None,
+        );
+
+        let mut state_hook = handle.state_hook().expect("state hook is None");
+        state_hook.on_state(StateChangeSource::Transaction(0), &update);
+        drop(state_hook);
+
+        handle.state_root().expect("task failed");
+
+        let preserved = payload_processor
+            .state_root_assets
+            .take()
+            .expect("expected preserved state-root assets");
+
+        match preserved {
+            PreservedStateRootAssets::Anchored { storage_root_cache, .. } => {
+                assert_eq!(storage_root_cache.get(&hashed_address), Some(EMPTY_ROOT_HASH));
             }
             PreservedStateRootAssets::Cleared { .. } => {
                 panic!("expected anchored state-root assets")
