@@ -19,6 +19,7 @@ use reth_chain_state::{
 use reth_errors::RethResult;
 use reth_evm::{execute::Executor, ConfigureEvm};
 use reth_execution_types::ExecutionOutcome;
+use reth_metrics::metrics::Counter;
 use reth_primitives_traits::{NodePrimitives, SealedHeader};
 use reth_rpc_api::{ReceiptWithProofResponse, RethApiServer};
 use reth_rpc_eth_types::{EthApiError, EthResult};
@@ -67,6 +68,7 @@ impl<Provider, EvmConfig> RethApi<Provider, EvmConfig> {
             receipt_proof_cache: Mutex::new(LruMap::new(ByLength::new(
                 DEFAULT_RECEIPT_PROOF_CACHE_SIZE,
             ))),
+            receipt_proof_metrics: ReceiptProofCacheMetrics::default(),
         });
         Self { inner }
     }
@@ -170,6 +172,8 @@ where
                     )));
                 }
 
+                self.inner.receipt_proof_metrics.hits.increment(1);
+
                 let target_nibbles = Nibbles::unpack(alloy_rlp::encode_fixed_size(&tx_index));
                 let proof = cached
                     .proof_nodes
@@ -188,7 +192,7 @@ where
             }
         }
 
-        // Cache miss — build the trie, cache it, and extract the proof.
+        self.inner.receipt_proof_metrics.misses.increment(1);
         let receipts = self
             .provider()
             .receipts_by_block(block_hash.into())?
@@ -504,7 +508,7 @@ impl<Provider, EvmConfig> Clone for RethApi<Provider, EvmConfig> {
     }
 }
 
-/// Default number of blocks to cache receipt tries for.
+/// Default number of blocks to cache receipt proof tries for.
 const DEFAULT_RECEIPT_PROOF_CACHE_SIZE: u32 = 64;
 
 struct RethApiInner<Provider, EvmConfig> {
@@ -519,6 +523,26 @@ struct RethApiInner<Provider, EvmConfig> {
     /// LRU cache of receipts trie proof nodes, keyed by block hash.
     /// Avoids rebuilding the trie when multiple users query proofs from the same block.
     receipt_proof_cache: Mutex<LruMap<B256, CachedReceiptsTrie>>,
+    /// Metrics for receipt proof cache.
+    receipt_proof_metrics: ReceiptProofCacheMetrics,
+}
+
+/// Metrics for the receipt proof cache.
+#[derive(Clone)]
+struct ReceiptProofCacheMetrics {
+    /// Number of receipt proof cache hits.
+    hits: Counter,
+    /// Number of receipt proof cache misses.
+    misses: Counter,
+}
+
+impl Default for ReceiptProofCacheMetrics {
+    fn default() -> Self {
+        Self {
+            hits: reth_metrics::metrics::counter!("rpc.reth.receipt_proof_cache.hits_total"),
+            misses: reth_metrics::metrics::counter!("rpc.reth.receipt_proof_cache.misses_total"),
+        }
+    }
 }
 
 /// Cached receipts trie data for a single block.
