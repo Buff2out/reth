@@ -74,6 +74,9 @@ pub struct PruneModes {
         )
     )]
     pub storage_history: Option<PruneMode>,
+    /// Headers pruning configuration.
+    #[cfg_attr(any(test, feature = "serde"), serde(skip_serializing_if = "Option::is_none"))]
+    pub headers: Option<PruneMode>,
     /// Bodies History pruning configuration.
     #[cfg_attr(any(test, feature = "serde"), serde(skip_serializing_if = "Option::is_none"))]
     pub bodies_history: Option<PruneMode>,
@@ -98,6 +101,7 @@ impl PruneModes {
             receipts: Some(PruneMode::Full),
             account_history: Some(PruneMode::Full),
             storage_history: Some(PruneMode::Full),
+            headers: Some(PruneMode::Full),
             bodies_history: Some(PruneMode::Full),
             receipts_log_filter: Default::default(),
         }

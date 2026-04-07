@@ -1216,14 +1216,15 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         // If this is a re-initialization, we need to clear this as well
         self.map.clear();
 
-        // initialize the expired history height to the lowest static file block
-        if let Some(lowest_range) =
-            indexes.get(StaticFileSegment::Transactions).and_then(|index| index.min_block_range)
-        {
-            // the earliest height is the lowest available block number
-            self.earliest_history_height
-                .store(lowest_range.start(), std::sync::atomic::Ordering::Relaxed);
-        }
+        let earliest_history_height = [StaticFileSegment::Headers, StaticFileSegment::Transactions]
+            .into_iter()
+            .filter_map(|segment| indexes.get(segment).and_then(|index| index.min_block_range))
+            .map(|range| range.start())
+            .max()
+            .unwrap_or_default();
+
+        self.earliest_history_height
+            .store(earliest_history_height, std::sync::atomic::Ordering::Relaxed);
 
         Ok(())
     }

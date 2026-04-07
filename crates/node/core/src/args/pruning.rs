@@ -73,6 +73,7 @@ impl Default for DefaultPruningValues {
                 receipts: Some(PruneMode::Distance(MINIMUM_UNWIND_SAFE_DISTANCE)),
                 account_history: Some(PruneMode::Distance(MINIMUM_UNWIND_SAFE_DISTANCE)),
                 storage_history: Some(PruneMode::Distance(MINIMUM_UNWIND_SAFE_DISTANCE)),
+                headers: None,
                 // This field is ignored when full_bodies_history_use_pre_merge is true
                 bodies_history: None,
                 receipts_log_filter: Default::default(),
@@ -84,6 +85,7 @@ impl Default for DefaultPruningValues {
                 receipts: Some(PruneMode::Distance(MINIMUM_DISTANCE)),
                 account_history: Some(PruneMode::Distance(MINIMUM_UNWIND_SAFE_DISTANCE)),
                 storage_history: Some(PruneMode::Distance(MINIMUM_UNWIND_SAFE_DISTANCE)),
+                headers: None,
                 bodies_history: Some(PruneMode::Distance(MINIMUM_UNWIND_SAFE_DISTANCE)),
                 receipts_log_filter: Default::default(),
             },
@@ -184,6 +186,19 @@ pub struct PruningArgs {
     #[arg(long = "prune.storage-history.before", alias = "prune.storagehistory.before", value_name = "BLOCK_NUMBER", conflicts_with_all = &["storage_history_full", "storage_history_distance"])]
     pub storage_history_before: Option<BlockNumber>,
 
+    // Headers
+    /// Prunes header history data.
+    #[arg(long = "prune.headers.full", conflicts_with_all = &["headers_distance", "headers_before"])]
+    pub headers_full: bool,
+    /// Prune header history before the `head-N` block number. In other words, keep last N + 1
+    /// blocks.
+    #[arg(long = "prune.headers.distance", value_name = "BLOCKS", conflicts_with_all = &["headers_full", "headers_before"])]
+    pub headers_distance: Option<u64>,
+    /// Prune header history before the specified block number. The specified block number is not
+    /// pruned.
+    #[arg(long = "prune.headers.before", value_name = "BLOCK_NUMBER", conflicts_with_all = &["headers_full", "headers_distance"])]
+    pub headers_before: Option<BlockNumber>,
+
     // Bodies
     /// Prune bodies before the merge block.
     #[arg(long = "prune.bodies.pre-merge", value_name = "BLOCKS", conflicts_with_all = &["bodies_distance", "bodies_before"])]
@@ -259,6 +274,9 @@ impl PruningArgs {
         }
         if let Some(mode) = self.account_history_prune_mode() {
             config.segments.account_history = Some(mode);
+        }
+        if let Some(mode) = self.headers_prune_mode() {
+            config.segments.headers = Some(mode);
         }
         if let Some(mode) = self.bodies_prune_mode(chain_spec) {
             config.segments.bodies_history = Some(mode);
@@ -348,6 +366,18 @@ impl PruningArgs {
         }
     }
 
+    const fn headers_prune_mode(&self) -> Option<PruneMode> {
+        if self.headers_full {
+            Some(PruneMode::Full)
+        } else if let Some(distance) = self.headers_distance {
+            Some(PruneMode::Distance(distance))
+        } else if let Some(block_number) = self.headers_before {
+            Some(PruneMode::Before(block_number))
+        } else {
+            None
+        }
+    }
+
     const fn storage_history_prune_mode(&self) -> Option<PruneMode> {
         if self.storage_history_full {
             Some(PruneMode::Full)
@@ -409,6 +439,7 @@ mod tests {
     use super::*;
     use alloy_primitives::address;
     use clap::Parser;
+    use reth_chainspec::MAINNET;
 
     /// A helper type to parse Args more easily
     #[derive(Parser)]
@@ -438,6 +469,22 @@ mod tests {
         let default_args = PruningArgs::default();
         let args = CommandParser::<PruningArgs>::parse_from(["reth"]).args;
         assert_eq!(args, default_args);
+    }
+
+    #[test]
+    fn parse_headers_pruning_flags() {
+        let args = CommandParser::<PruningArgs>::parse_from(["reth", "--prune.headers.full"]).args;
+
+        assert!(args.headers_full);
+        let config = args.prune_config(MAINNET.as_ref()).expect("headers prune config");
+        assert_eq!(config.segments.headers, Some(PruneMode::Full));
+
+        let args =
+            CommandParser::<PruningArgs>::parse_from(["reth", "--prune.headers.before", "900000"])
+                .args;
+
+        let config = args.prune_config(MAINNET.as_ref()).expect("headers prune config");
+        assert_eq!(config.segments.headers, Some(PruneMode::Before(900_000)));
     }
 
     #[test]

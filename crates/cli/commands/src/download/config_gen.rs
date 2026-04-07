@@ -56,16 +56,17 @@ where
     let segments = &config.prune.segments;
 
     // Collect (segment, mode) pairs for all configured prune segments
-    let checkpoints: Vec<(PruneSegment, PruneMode)> = [
-        (PruneSegment::SenderRecovery, segments.sender_recovery),
-        (PruneSegment::TransactionLookup, segments.transaction_lookup),
-        (PruneSegment::Receipts, segments.receipts),
-        (PruneSegment::AccountHistory, segments.account_history),
-        (PruneSegment::StorageHistory, segments.storage_history),
-        (PruneSegment::Bodies, segments.bodies_history),
+    let checkpoints: Vec<(PruneSegment, PruneMode, bool)> = [
+        (PruneSegment::SenderRecovery, segments.sender_recovery, true),
+        (PruneSegment::TransactionLookup, segments.transaction_lookup, true),
+        (PruneSegment::Receipts, segments.receipts, true),
+        (PruneSegment::AccountHistory, segments.account_history, true),
+        (PruneSegment::StorageHistory, segments.storage_history, true),
+        (PruneSegment::Headers, segments.headers, false),
+        (PruneSegment::Bodies, segments.bodies_history, true),
     ]
     .into_iter()
-    .filter_map(|(segment, mode)| mode.map(|m| (segment, m)))
+    .filter_map(|(segment, mode, uses_tx_number)| mode.map(|m| (segment, m, uses_tx_number)))
     .collect();
 
     if checkpoints.is_empty() {
@@ -76,10 +77,10 @@ where
     let tx_number =
         tx.get::<tables::BlockBodyIndices>(snapshot_block)?.map(|indices| indices.last_tx_num());
 
-    for (segment, prune_mode) in &checkpoints {
+    for (segment, prune_mode, uses_tx_number) in &checkpoints {
         let checkpoint = PruneCheckpoint {
             block_number: Some(snapshot_block),
-            tx_number,
+            tx_number: uses_tx_number.then_some(tx_number).flatten(),
             prune_mode: *prune_mode,
         };
 
@@ -259,6 +260,7 @@ pub(crate) fn describe_prune_config(config: &Config) -> Vec<String> {
     [
         ("sender_recovery", segments.sender_recovery),
         ("transaction_lookup", segments.transaction_lookup),
+        ("headers", segments.headers),
         ("bodies_history", segments.bodies_history),
         ("receipts", segments.receipts),
         ("account_history", segments.account_history),

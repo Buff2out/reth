@@ -78,6 +78,7 @@ pub enum SegmentArg {
     ContractLogs,
     AccountHistory,
     StorageHistory,
+    Headers,
     Bodies,
 }
 
@@ -90,6 +91,7 @@ impl From<SegmentArg> for PruneSegment {
             SegmentArg::ContractLogs => Self::ContractLogs,
             SegmentArg::AccountHistory => Self::AccountHistory,
             SegmentArg::StorageHistory => Self::StorageHistory,
+            SegmentArg::Headers => Self::Headers,
             SegmentArg::Bodies => Self::Bodies,
         }
     }

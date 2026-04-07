@@ -28,8 +28,6 @@ pub enum PruneSegment {
     AccountHistory,
     /// Prunes storage changesets (static files/MDBX) and `StoragesHistory`.
     StorageHistory,
-    #[deprecated = "Variant indexes cannot be changed"]
-    #[strum(disabled)]
     /// Prune segment responsible for the `CanonicalHeaders`, `Headers` tables.
     Headers,
     #[deprecated = "Variant indexes cannot be changed"]
@@ -66,13 +64,13 @@ impl PruneSegment {
     pub const fn min_blocks(&self) -> u64 {
         match self {
             Self::SenderRecovery | Self::TransactionLookup => 0,
-            Self::Receipts | Self::Bodies => MINIMUM_DISTANCE,
+            Self::Receipts | Self::Headers | Self::Bodies => MINIMUM_DISTANCE,
             Self::ContractLogs | Self::AccountHistory | Self::StorageHistory => {
                 MINIMUM_UNWIND_SAFE_DISTANCE
             }
             #[expect(deprecated)]
             #[expect(clippy::match_same_arms)]
-            Self::Headers | Self::Transactions | Self::MerkleChangeSets => 0,
+            Self::Transactions | Self::MerkleChangeSets => 0,
         }
     }
 
@@ -121,13 +119,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_prune_segment_iter_excludes_deprecated() {
+    fn test_prune_segment_iter_includes_headers_and_excludes_deprecated() {
         let segments: Vec<PruneSegment> = PruneSegment::variants().collect();
+
+        assert!(segments.contains(&PruneSegment::Headers));
 
         // Verify deprecated variants are not included derived iter
         #[expect(deprecated)]
         {
-            assert!(!segments.contains(&PruneSegment::Headers));
             assert!(!segments.contains(&PruneSegment::Transactions));
             assert!(!segments.contains(&PruneSegment::MerkleChangeSets));
         }

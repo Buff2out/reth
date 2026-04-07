@@ -905,6 +905,15 @@ Pruning:
       --prune.storage-history.before <BLOCK_NUMBER>
           Prune storage history before the specified block number. The specified block number is not pruned
 
+      --prune.headers.full
+          Prunes header history data
+
+      --prune.headers.distance <BLOCKS>
+          Prune header history before the `head-N` block number. In other words, keep last N + 1 blocks
+
+      --prune.headers.before <BLOCK_NUMBER>
+          Prune header history before the specified block number. The specified block number is not pruned
+
       --prune.bodies.pre-merge
           Prune bodies before the merge block
 

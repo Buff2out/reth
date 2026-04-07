@@ -17,7 +17,7 @@ pub use set::SegmentSet;
 use std::{fmt::Debug, ops::RangeInclusive};
 use tracing::error;
 pub use user::{
-    AccountHistory, Bodies, Receipts as UserReceipts, ReceiptsByLogs, SenderRecovery,
+    AccountHistory, Bodies, Headers, Receipts as UserReceipts, ReceiptsByLogs, SenderRecovery,
     StorageHistory, TransactionLookup,
 };
 
@@ -67,6 +67,52 @@ where
         checkpoint: Some(SegmentOutputCheckpoint {
             block_number: checkpoint_block,
             tx_number: tx_ranges.map(|range| range.end()).max(),
+        }),
+    })
+}
+
+/// Prunes block-based static files for a given segment.
+///
+/// This is used by header pruning where deleted rows are tracked by block, not transaction.
+pub(crate) fn prune_block_based_static_files<Provider>(
+    provider: &Provider,
+    input: PruneInput,
+    segment: StaticFileSegment,
+) -> Result<SegmentOutput, PrunerError>
+where
+    Provider: StaticFileProviderFactory,
+{
+    let deleted_headers =
+        provider.static_file_provider().delete_segment_below_block(segment, input.to_block + 1)?;
+
+    if deleted_headers.is_empty() {
+        return Ok(SegmentOutput {
+            progress: PruneProgress::Finished,
+            pruned: 0,
+            checkpoint: input
+                .previous_checkpoint
+                .map(SegmentOutputCheckpoint::from_prune_checkpoint),
+        })
+    }
+
+    let pruned = deleted_headers
+        .iter()
+        .filter_map(|header| header.block_range())
+        .map(|range| range.len())
+        .sum::<u64>() as usize;
+
+    let checkpoint_block = deleted_headers
+        .iter()
+        .filter_map(|header| header.block_range())
+        .map(|range| range.end())
+        .max();
+
+    Ok(SegmentOutput {
+        progress: PruneProgress::Finished,
+        pruned,
+        checkpoint: Some(SegmentOutputCheckpoint {
+            block_number: checkpoint_block,
+            tx_number: None,
         }),
     })
 }

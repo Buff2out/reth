@@ -1,5 +1,5 @@
 use crate::segments::{
-    user::ReceiptsByLogs, AccountHistory, Bodies, Segment, SenderRecovery, StorageHistory,
+    user::ReceiptsByLogs, AccountHistory, Bodies, Headers, Segment, SenderRecovery, StorageHistory,
     TransactionLookup, UserReceipts,
 };
 use alloy_eips::eip2718::Encodable2718;
@@ -71,11 +71,14 @@ where
             receipts,
             account_history,
             storage_history,
+            headers,
             bodies_history,
             receipts_log_filter,
         } = prune_modes;
 
         Self::default()
+            // Headers
+            .segment_opt(headers.map(Headers::new))
             // Transaction lookup must run before bodies because it needs to read transaction
             // data from static files before bodies deletes them.
             .segment_opt(transaction_lookup.map(TransactionLookup::new))
