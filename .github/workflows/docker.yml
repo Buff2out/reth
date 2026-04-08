@@ -125,8 +125,6 @@ jobs:
 
           elif [[ "${{ github.event_name }}" == "schedule" ]] || [[ "${{ inputs.build_type }}" == "nightly" ]]; then
             echo "targets=nightly" >> "$GITHUB_OUTPUT"
-            echo "ethereum_tags=${REGISTRY}/reth:nightly" >> "$GITHUB_OUTPUT"
-            echo "ethereum_set=" >> "$GITHUB_OUTPUT"
 
           else
             # git-sha build
