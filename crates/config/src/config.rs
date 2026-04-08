@@ -281,6 +281,11 @@ pub struct ExecutionConfig {
         )
     )]
     pub max_duration: Option<Duration>,
+    /// The maximum number of blocks per pipeline run before the execution stage reports
+    /// completion, forcing subsequent stages (hashing, merkle) to run.
+    ///
+    /// When set, enables per-batch state root verification. Useful for debugging.
+    pub max_blocks_per_run: Option<u64>,
 }
 
 impl Default for ExecutionConfig {
@@ -292,6 +297,7 @@ impl Default for ExecutionConfig {
             max_cumulative_gas: Some(30_000_000 * 50_000),
             // 10 minutes
             max_duration: Some(Duration::from_secs(10 * 60)),
+            max_blocks_per_run: None,
         }
     }
 }
@@ -303,6 +309,7 @@ impl From<ExecutionConfig> for ExecutionStageThresholds {
             max_changes: config.max_changes,
             max_cumulative_gas: config.max_cumulative_gas,
             max_duration: config.max_duration,
+            max_blocks_per_run: config.max_blocks_per_run,
         }
     }
 }

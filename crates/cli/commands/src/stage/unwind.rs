@@ -123,6 +123,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
                         max_changes: None,
                         max_cumulative_gas: None,
                         max_duration: None,
+                        max_blocks_per_run: None,
                     },
                     stage_conf.execution_external_clean_threshold(),
                     ExExManagerHandle::empty(),

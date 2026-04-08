@@ -267,6 +267,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                             max_changes: None,
                             max_cumulative_gas: None,
                             max_duration: None,
+                            max_blocks_per_run: None,
                         },
                         config.stages.merkle.incremental_threshold,
                         ExExManagerHandle::empty(),

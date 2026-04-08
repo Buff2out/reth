@@ -507,7 +507,10 @@ where
             "Execution time"
         );
 
-        let done = stage_progress == max_block;
+        let done = stage_progress == max_block ||
+            self.thresholds
+                .max_blocks_per_run
+                .is_some_and(|limit| stage_progress - start_block + 1 >= limit);
         Ok(ExecOutput {
             checkpoint: StageCheckpoint::new(stage_progress)
                 .with_execution_stage_checkpoint(stage_checkpoint),
@@ -782,6 +785,7 @@ mod tests {
                 max_changes: None,
                 max_cumulative_gas: None,
                 max_duration: None,
+                max_blocks_per_run: None,
             },
             MERKLE_STAGE_DEFAULT_REBUILD_THRESHOLD,
             ExExManagerHandle::empty(),
