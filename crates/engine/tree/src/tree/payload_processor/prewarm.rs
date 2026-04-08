@@ -319,8 +319,10 @@ where
         }
     }
 
-    /// Runs BAL-based prewarming by using the prewarming pool's parallel iterator to prefetch
-    /// accounts and storage slots.
+    /// Spawns BAL-based prewarming on a background task.
+    ///
+    /// The task uses the prewarming pool's parallel iterator to prefetch accounts and storage
+    /// slots, then forwards the BAL-owned hashed state to the multiproof task.
     #[instrument(level = "debug", target = "engine::tree::payload_processor::prewarm", skip_all)]
     fn run_bal_prewarm(
         &self,
@@ -353,34 +355,48 @@ where
         );
 
         let ctx = self.ctx.clone();
-        self.executor.prewarming_pool().install_fn(|| {
-            bal.par_iter().for_each_init(
-                || (ctx.clone(), None::<CachedStateProvider<reth_provider::StateProviderBox>>),
-                |(ctx, provider), account| {
-                    if ctx.should_stop() {
-                        return;
-                    }
-                    ctx.prefetch_bal_account(provider, account);
-                },
+        let executor = self.executor.clone();
+        let bal_for_prewarm = Arc::clone(&bal);
+        let span = Span::current();
+        self.executor.spawn_blocking_named("prewarm-bal", move || {
+            let _enter = debug_span!(
+                target: "engine::tree::payload_processor::prewarm",
+                parent: span,
+                "prewarm_bal"
+            )
+            .entered();
+
+            executor.prewarming_pool().install_fn(|| {
+                bal_for_prewarm.par_iter().for_each_init(
+                    || (ctx.clone(), None::<CachedStateProvider<reth_provider::StateProviderBox>>),
+                    |(ctx, provider), account| {
+                        if ctx.should_stop() {
+                            return;
+                        }
+                        ctx.prefetch_bal_account(provider, account);
+                    },
+                );
+            });
+
+            trace!(
+                target: "engine::tree::payload_processor::prewarm",
+                "All BAL prewarm accounts completed"
             );
+
+            // Signal that execution has finished.
+            let _ =
+                actions_tx.send(PrewarmTaskEvent::FinishedTxExecution { executed_transactions: 0 });
         });
 
-        trace!(
-            target: "engine::tree::payload_processor::prewarm",
-            "All BAL prewarm accounts completed"
-        );
-
-        // Convert BAL to HashedPostState and send to multiproof task
+        // Convert the BAL to HashedPostState and hand it to the multiproof task after the BAL
+        // prewarm work has been spawned so proof work does not wait on cache warming.
         self.send_bal_hashed_state(&bal);
-
-        // Signal that execution has finished
-        let _ = actions_tx.send(PrewarmTaskEvent::FinishedTxExecution { executed_transactions: 0 });
     }
 
     /// Converts the BAL to [`HashedPostState`](reth_trie::HashedPostState) and sends it to the
     /// multiproof task.
     fn send_bal_hashed_state(&self, bal: &BlockAccessList) {
-        let Some(to_multi_proof) = &self.to_multi_proof else { return };
+        let Some(to_multi_proof) = self.to_multi_proof.as_ref() else { return };
 
         let provider = match self.ctx.provider.build() {
             Ok(provider) => provider,
