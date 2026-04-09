@@ -368,6 +368,13 @@ where
             rayon::join(
                 // Left: prefetch storage slots into execution cache (prewarming pool)
                 || {
+                    let _span = debug_span!(
+                        target: "engine::tree::payload_processor::prewarm",
+                        "bal_prefetch_storage",
+                        bal_accounts = bal.len(),
+                    )
+                    .entered();
+
                     if ctx.saved_cache.is_none() {
                         return;
                     }
@@ -389,14 +396,16 @@ where
                             },
                         );
                     });
-
-                    trace!(
-                        target: "engine::tree::payload_processor::prewarm",
-                        "All BAL prewarm storage completed"
-                    );
                 },
                 // Right: stream hashed state updates to the multiproof task (BAL prewarming pool)
                 || {
+                    let _span = debug_span!(
+                        target: "engine::tree::payload_processor::prewarm",
+                        "bal_hashed_state_stream",
+                        bal_accounts = bal.len(),
+                    )
+                    .entered();
+
                     let Some(to_multi_proof) = to_multi_proof.as_ref() else { return };
 
                     executor.bal_prewarming_pool().install_fn(|| {
