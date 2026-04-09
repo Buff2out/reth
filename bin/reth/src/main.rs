@@ -18,7 +18,7 @@ use reth_node_ethereum::EthereumNode;
 use tracing::info;
 
 fn main() {
-    reth_cli_util::sigsegv_handler::install();
+    reth_cli_util::init();
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
     if std::env::var_os("RUST_BACKTRACE").is_none() {

@@ -38,3 +38,30 @@ pub mod sigsegv_handler {
     /// No-op function.
     pub fn install() {}
 }
+
+/// Installs process-wide signal handlers and other one-time setup.
+///
+/// Currently this:
+/// - Installs a SIGSEGV handler that prints a backtrace on stack overflow.
+/// - Ignores SIGPIPE so broken pipes (e.g. `reth | tee`) result in `EPIPE` errors instead of
+///   killing the process, allowing graceful shutdown to run.
+pub fn init() {
+    sigsegv_handler::install();
+
+    #[cfg(unix)]
+    ignore_sigpipe();
+}
+
+/// Ignores SIGPIPE so that writes to broken pipes return `EPIPE` instead of killing the process.
+///
+/// Without this, piping reth output through another program (e.g. `reth node | tee log`) can
+/// cause an ungraceful shutdown: when the pipe reader is killed, the next write to stdout
+/// delivers SIGPIPE which terminates reth immediately, skipping cleanup and leaving static files
+/// inconsistent with database checkpoints.
+#[cfg(unix)]
+fn ignore_sigpipe() {
+    // SAFETY: `signal()` with `SIG_IGN` is async-signal-safe and has no preconditions.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}

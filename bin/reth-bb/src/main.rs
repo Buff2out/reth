@@ -354,7 +354,7 @@ where
 // ---------------------------------------------------------------------------
 
 fn main() {
-    reth_cli_util::sigsegv_handler::install();
+    reth_cli_util::init();
 
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
