@@ -1,15 +1,10 @@
 //! `reth db migrate-v2` command for migrating v1 storage layout to v2.
 //!
-//! Migrates data from MDBX-only (v1) storage layout to the hybrid v2 layout:
-//! - TransactionSenders → static files
-//! - AccountChangeSets → static files
-//! - StorageChangeSets → static files
-//! - Receipts → static files (if not already there)
-//! - TransactionHashNumbers → RocksDB
-//! - AccountsHistory → RocksDB
-//! - StoragesHistory → RocksDB
-//!
-//! Then updates `StorageSettings` to v2.
+//! Migrates data that cannot be recomputed (changesets + receipts) from MDBX to
+//! static files, clears tables that *can* be recomputed (senders, indices, trie,
+//! plain state), resets the corresponding stage checkpoints, and flips
+//! `StorageSettings` to v2. The node will rebuild the cleared tables via the
+//! normal pipeline on next startup.
 
 use clap::Parser;
 use reth_db::{
@@ -26,8 +21,8 @@ use reth_db_api::{
 use reth_db_common::DbTool;
 use reth_provider::{
     providers::ProviderNodeTypes, DBProvider, DatabaseProviderFactory, MetadataProvider,
-    MetadataWriter, PruneCheckpointReader, RocksDBProviderFactory, StageCheckpointWriter,
-    StaticFileProviderFactory, StaticFileWriter, StorageSettings,
+    MetadataWriter, PruneCheckpointReader, StageCheckpointWriter, StaticFileProviderFactory,
+    StaticFileWriter, StorageSettings,
 };
 use reth_prune_types::PruneSegment;
 use reth_stages_types::{StageCheckpoint, StageId};
@@ -43,10 +38,9 @@ pub struct Command;
 impl Command {
     /// Execute the migration.
     ///
-    /// Migrates all v1 data to v2 layout, prunes the now-redundant MDBX tables
-    /// (including plain state), and compacts the database. The caller must run
-    /// [`Self::compact_mdbx`] while the DB handle is still open, then
-    /// [`Self::swap_compacted_db`] after dropping it.
+    /// Only migrates changesets + receipts (data that cannot be recomputed),
+    /// then clears recomputable tables and resets their stage checkpoints.
+    /// The pipeline will rebuild senders, indices, trie, etc. on next startup.
     pub fn execute<N: ProviderNodeTypes>(self, tool: &DbTool<N>) -> eyre::Result<()>
     where
         N::Primitives: reth_primitives_traits::NodePrimitives<
@@ -72,11 +66,8 @@ impl Command {
         let sf_provider = tool.provider_factory.static_file_provider();
 
         // Check that target static file segments are empty
-        for segment in [
-            StaticFileSegment::TransactionSenders,
-            StaticFileSegment::AccountChangeSets,
-            StaticFileSegment::StorageChangeSets,
-        ] {
+        for segment in [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
+        {
             if sf_provider.get_highest_static_file_block(segment).is_some() {
                 eyre::bail!(
                     "Static file segment {segment:?} already contains data. \
@@ -85,56 +76,31 @@ impl Command {
             }
         }
 
-        // Check that RocksDB tables are empty
-        let rocksdb = tool.provider_factory.rocksdb_provider();
-        if rocksdb.first::<tables::TransactionHashNumbers>()?.is_some() {
-            eyre::bail!("RocksDB TransactionHashNumbers already contains data");
-        }
-        if rocksdb.first::<tables::AccountsHistory>()?.is_some() {
-            eyre::bail!("RocksDB AccountsHistory already contains data");
-        }
-        if rocksdb.first::<tables::StoragesHistory>()?.is_some() {
-            eyre::bail!("RocksDB StoragesHistory already contains data");
-        }
-
         drop(provider);
         info!(target: "reth::cli", "Preflight checks passed");
 
-        // === Phase 1: TransactionSenders → static files ===
-        self.migrate_transaction_senders(tool, tip)?;
-
-        // === Phase 2: AccountChangeSets → static files ===
+        // === Phase 1: AccountChangeSets → static files ===
         self.migrate_account_changesets(tool, tip)?;
 
-        // === Phase 3: StorageChangeSets → static files ===
+        // === Phase 2: StorageChangeSets → static files ===
         self.migrate_storage_changesets(tool, tip)?;
 
-        // === Phase 4: Receipts → static files ===
+        // === Phase 3: Receipts → static files ===
         self.migrate_receipts::<N>(tool, tip)?;
 
-        // === Phase 5: TransactionHashNumbers → RocksDB ===
-        self.migrate_transaction_hash_numbers(tool)?;
-
-        // === Phase 6: AccountsHistory → RocksDB ===
-        self.migrate_accounts_history(tool)?;
-
-        // === Phase 7: StoragesHistory → RocksDB ===
-        self.migrate_storages_history(tool)?;
-
-        // === Phase 8: Verify hashed state ===
-        self.verify_hashed_state(tool, tip)?;
-
-        // === Phase 9: Update metadata to v2 ===
+        // === Phase 4: Update metadata to v2 ===
         info!(target: "reth::cli", "Writing StorageSettings v2 metadata");
-        let provider_rw = tool.provider_factory.database_provider_rw()?;
-        provider_rw.write_storage_settings(StorageSettings::v2())?;
-        provider_rw.commit()?;
+        {
+            let provider_rw = tool.provider_factory.database_provider_rw()?;
+            provider_rw.write_storage_settings(StorageSettings::v2())?;
+            provider_rw.commit()?;
+        }
         info!(target: "reth::cli", "Storage settings updated to v2");
 
-        // === Phase 10: Prune migrated MDBX tables and plain state ===
-        self.prune_migrated_tables(tool)?;
+        // === Phase 5: Clear recomputable tables and reset stage checkpoints ===
+        self.clear_recomputable_tables(tool)?;
 
-        info!(target: "reth::cli", "Migration complete!");
+        info!(target: "reth::cli", "Migration complete! Start the node to rebuild indices, senders, and trie.");
         Ok(())
     }
 
@@ -149,73 +115,16 @@ impl Command {
 
         info!(target: "reth::cli", ?db_path, ?compact_path, "Swapping compacted database");
 
-        // Rename original → backup
         std::fs::rename(db_path, &backup_path)?;
 
-        // Rename compacted → original
         if let Err(e) = std::fs::rename(compact_path, db_path) {
-            // Restore backup on failure
             let _ = std::fs::rename(&backup_path, db_path);
             return Err(e.into());
         }
 
-        // Remove backup
         std::fs::remove_dir_all(&backup_path)?;
 
         info!(target: "reth::cli", "Database compaction swap complete");
-        Ok(())
-    }
-
-    fn migrate_transaction_senders<N: ProviderNodeTypes>(
-        &self,
-        tool: &DbTool<N>,
-        tip: u64,
-    ) -> eyre::Result<()> {
-        info!(target: "reth::cli", "Migrating TransactionSenders → static files");
-        let provider = tool.provider_factory.provider()?;
-        let sf_provider = tool.provider_factory.static_file_provider();
-
-        let mut sender_cursor = provider.tx_ref().cursor_read::<tables::TransactionSenders>()?;
-        let mut block_cursor = provider.tx_ref().cursor_read::<tables::BlockBodyIndices>()?;
-
-        // Find the first unpruned block (SenderRecovery prune checkpoint tells us
-        // the highest pruned block; data starts at checkpoint + 1).
-        let first_block = provider
-            .get_prune_checkpoint(PruneSegment::SenderRecovery)?
-            .and_then(|cp| cp.block_number)
-            .map_or(0, |b| b + 1);
-
-        let mut writer =
-            sf_provider.get_writer(first_block, StaticFileSegment::TransactionSenders)?;
-
-        let mut count = 0u64;
-        let block_walker = block_cursor.walk(Some(first_block))?;
-        for result in block_walker {
-            let (block_number, body_indices) = result?;
-            if block_number > tip {
-                break;
-            }
-            writer.increment_block(block_number)?;
-
-            let tx_range = body_indices.tx_num_range();
-            if tx_range.is_empty() {
-                continue;
-            }
-
-            let senders_walker = sender_cursor.walk_range(tx_range)?;
-            for entry in senders_walker {
-                let (tx_num, sender) = entry?;
-                writer.append_transaction_sender(tx_num, &sender)?;
-                count += 1;
-            }
-        }
-
-        // Fill trailing empty blocks up to tip
-        writer.ensure_at_block(tip)?;
-        writer.commit()?;
-        drop(provider);
-
-        info!(target: "reth::cli", count, "TransactionSenders migrated");
         Ok(())
     }
 
@@ -225,7 +134,7 @@ impl Command {
         tip: u64,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", "Migrating AccountChangeSets → static files");
-        let provider = tool.provider_factory.provider()?;
+        let provider = tool.provider_factory.provider()?.disable_long_read_transaction_safety();
         let sf_provider = tool.provider_factory.static_file_provider();
 
         let mut cursor = provider.tx_ref().cursor_read::<tables::AccountChangeSets>()?;
@@ -242,7 +151,6 @@ impl Command {
         let mut count = 0u64;
         let mut walker = cursor.walk(Some(first_block))?.peekable();
 
-        // Iterate all blocks from first_block..=tip, including empty ones
         for block in first_block..=tip {
             let mut entries = Vec::new();
 
@@ -271,7 +179,7 @@ impl Command {
         tip: u64,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", "Migrating StorageChangeSets → static files");
-        let provider = tool.provider_factory.provider()?;
+        let provider = tool.provider_factory.provider()?.disable_long_read_transaction_safety();
         let sf_provider = tool.provider_factory.static_file_provider();
 
         let mut cursor = provider.tx_ref().cursor_read::<tables::StorageChangeSets>()?;
@@ -288,7 +196,6 @@ impl Command {
         let mut count = 0u64;
         let mut walker = cursor.walk(Some(Default::default()))?.peekable();
 
-        // Iterate all blocks from first_block..=tip, including empty ones
         for block in first_block..=tip {
             let mut entries = Vec::new();
 
@@ -322,7 +229,6 @@ impl Command {
         >,
     {
         // If receipt log filter pruning is enabled, receipts must stay in MDBX
-        // (v2 doesn't support static file receipts with log filter pruning yet).
         let provider = tool.provider_factory.provider()?;
         if !provider.prune_modes_ref().receipts_log_filter.is_empty() {
             info!(target: "reth::cli", "Receipt log filter pruning is enabled, keeping receipts in MDBX");
@@ -341,7 +247,6 @@ impl Command {
 
         info!(target: "reth::cli", "Migrating Receipts → static files");
 
-        // Find the first unpruned block from Receipts prune checkpoint
         let provider = tool.provider_factory.provider()?.disable_long_read_transaction_safety();
         let prune_start = provider
             .get_prune_checkpoint(PruneSegment::Receipts)?
@@ -360,138 +265,13 @@ impl Command {
         Ok(())
     }
 
-    fn migrate_transaction_hash_numbers<N: ProviderNodeTypes>(
+    /// Clears tables that can be recomputed by the pipeline and resets their
+    /// stage checkpoints. The node will rebuild them on next startup.
+    fn clear_recomputable_tables<N: ProviderNodeTypes>(
         &self,
         tool: &DbTool<N>,
     ) -> eyre::Result<()> {
-        info!(target: "reth::cli", "Migrating TransactionHashNumbers → RocksDB");
-        let provider = tool.provider_factory.provider()?;
-        let rocksdb = tool.provider_factory.rocksdb_provider();
-
-        let mut cursor = provider.tx_ref().cursor_read::<tables::TransactionHashNumbers>()?;
-        let mut batch = rocksdb.batch_with_auto_commit();
-
-        let mut count = 0u64;
-        let walker = cursor.walk(None)?;
-        for result in walker {
-            let (key, value) = result?;
-            batch.put::<tables::TransactionHashNumbers>(key, &value)?;
-            count += 1;
-            if count.is_multiple_of(1_000_000) {
-                info!(target: "reth::cli", count, "TransactionHashNumbers progress");
-            }
-        }
-
-        batch.commit()?;
-        drop(provider);
-
-        info!(target: "reth::cli", count, "TransactionHashNumbers migrated");
-        Ok(())
-    }
-
-    fn migrate_accounts_history<N: ProviderNodeTypes>(&self, tool: &DbTool<N>) -> eyre::Result<()> {
-        info!(target: "reth::cli", "Migrating AccountsHistory → RocksDB");
-        let provider = tool.provider_factory.provider()?;
-        let rocksdb = tool.provider_factory.rocksdb_provider();
-
-        let mut cursor = provider.tx_ref().cursor_read::<tables::AccountsHistory>()?;
-        let mut batch = rocksdb.batch_with_auto_commit();
-
-        let mut count = 0u64;
-        let walker = cursor.walk(None)?;
-        for result in walker {
-            let (key, value) = result?;
-            batch.put::<tables::AccountsHistory>(key, &value)?;
-            count += 1;
-            if count.is_multiple_of(1_000_000) {
-                info!(target: "reth::cli", count, "AccountsHistory progress");
-            }
-        }
-
-        batch.commit()?;
-        drop(provider);
-
-        info!(target: "reth::cli", count, "AccountsHistory migrated");
-        Ok(())
-    }
-
-    fn migrate_storages_history<N: ProviderNodeTypes>(&self, tool: &DbTool<N>) -> eyre::Result<()> {
-        info!(target: "reth::cli", "Migrating StoragesHistory → RocksDB");
-        let provider = tool.provider_factory.provider()?;
-        let rocksdb = tool.provider_factory.rocksdb_provider();
-
-        let mut cursor = provider.tx_ref().cursor_read::<tables::StoragesHistory>()?;
-        let mut batch = rocksdb.batch_with_auto_commit();
-
-        let mut count = 0u64;
-        let walker = cursor.walk(None)?;
-        for result in walker {
-            let (key, value) = result?;
-            batch.put::<tables::StoragesHistory>(key, &value)?;
-            count += 1;
-            if count.is_multiple_of(1_000_000) {
-                info!(target: "reth::cli", count, "StoragesHistory progress");
-            }
-        }
-
-        batch.commit()?;
-        drop(provider);
-
-        info!(target: "reth::cli", count, "StoragesHistory migrated");
-        Ok(())
-    }
-
-    fn verify_hashed_state<N: ProviderNodeTypes>(
-        &self,
-        tool: &DbTool<N>,
-        tip: u64,
-    ) -> eyre::Result<()> {
-        if tip == 0 {
-            info!(target: "reth::cli", "Empty chain, skipping hashed state verification");
-            return Ok(());
-        }
-
-        info!(target: "reth::cli", "Verifying HashedAccounts/HashedStorages are populated");
-        let provider = tool.provider_factory.provider()?;
-
-        // Check AccountHashing
-        let account_hashing = provider
-            .get_stage_checkpoint(StageId::AccountHashing)?
-            .map(|c| c.block_number)
-            .unwrap_or(0);
-
-        eyre::ensure!(
-            account_hashing >= tip,
-            "AccountHashing stage checkpoint ({account_hashing}) is behind execution tip ({tip}). \
-             HashedAccounts may not be fully populated."
-        );
-
-        // Check StorageHashing
-        let storage_hashing = provider
-            .get_stage_checkpoint(StageId::StorageHashing)?
-            .map(|c| c.block_number)
-            .unwrap_or(0);
-
-        eyre::ensure!(
-            storage_hashing >= tip,
-            "StorageHashing stage checkpoint ({storage_hashing}) is behind execution tip ({tip}). \
-             HashedStorages may not be fully populated."
-        );
-
-        // Spot-check that HashedAccounts has at least one entry
-        let mut cursor = provider.tx_ref().cursor_read::<tables::HashedAccounts>()?;
-        eyre::ensure!(
-            cursor.first()?.is_some(),
-            "HashedAccounts table is empty but chain has state."
-        );
-
-        drop(provider);
-        info!(target: "reth::cli", "Hashed state verification passed");
-        Ok(())
-    }
-
-    fn prune_migrated_tables<N: ProviderNodeTypes>(&self, tool: &DbTool<N>) -> eyre::Result<()> {
-        info!(target: "reth::cli", "Pruning migrated MDBX tables");
+        info!(target: "reth::cli", "Clearing recomputable MDBX tables");
         let db = tool.provider_factory.db_ref();
 
         macro_rules! clear_table {
@@ -503,32 +283,45 @@ impl Command {
             }};
         }
 
-        // Tables migrated to static files
-        clear_table!(tables::TransactionSenders);
+        // Migrated changeset tables (now in static files)
         clear_table!(tables::AccountChangeSets);
         clear_table!(tables::StorageChangeSets);
 
-        // Tables migrated to RocksDB
+        // Senders — will be recomputed by SenderRecovery stage
+        clear_table!(tables::TransactionSenders);
+
+        // Indices — will be recomputed by TransactionLookup / IndexAccountHistory /
+        // IndexStorageHistory
         clear_table!(tables::TransactionHashNumbers);
         clear_table!(tables::AccountsHistory);
         clear_table!(tables::StoragesHistory);
 
-        // Plain state tables superseded by hashed state in v2
+        // Plain state — superseded by hashed state in v2
         clear_table!(tables::PlainAccountState);
         clear_table!(tables::PlainStorageState);
 
-        // Trie tables must be rebuilt (encoding changed between v1 and v2)
+        // Trie — will be rebuilt by MerkleExecute
         clear_table!(tables::AccountsTrie);
         clear_table!(tables::StoragesTrie);
 
-        // Reset Merkle checkpoint so the trie is rebuilt on next startup
+        // Reset stage checkpoints so the pipeline rebuilds everything
+        info!(target: "reth::cli", "Resetting stage checkpoints");
         let provider_rw = tool.provider_factory.database_provider_rw()?;
-        provider_rw.save_stage_checkpoint(StageId::MerkleExecute, StageCheckpoint::new(0))?;
+        for stage in [
+            StageId::SenderRecovery,
+            StageId::TransactionLookup,
+            StageId::IndexAccountHistory,
+            StageId::IndexStorageHistory,
+            StageId::MerkleExecute,
+            StageId::MerkleUnwind,
+        ] {
+            provider_rw.save_stage_checkpoint(stage, StageCheckpoint::new(0))?;
+            info!(target: "reth::cli", %stage, "Checkpoint reset to 0");
+        }
         provider_rw.save_stage_checkpoint_progress(StageId::MerkleExecute, vec![])?;
         provider_rw.commit()?;
-        info!(target: "reth::cli", "MerkleExecute checkpoint reset to 0");
 
-        info!(target: "reth::cli", "MDBX tables pruned");
+        info!(target: "reth::cli", "Recomputable tables cleared and checkpoints reset");
         Ok(())
     }
 
