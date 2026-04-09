@@ -323,7 +323,7 @@ where
     ///
     /// Uses `rayon::join` to run two halves concurrently on separate pools:
     /// 1. Storage prefetch on the prewarming pool to populate the execution cache.
-    /// 2. Hashed state streaming on the BAL prewarming pool so storage updates can reach the sparse
+    /// 2. Hashed state streaming on the BAL streaming pool so storage updates can reach the sparse
     ///    trie before account reads finish.
     #[instrument(level = "debug", target = "engine::tree::payload_processor::prewarm", skip_all)]
     fn run_bal_prewarm(
@@ -390,7 +390,7 @@ where
 
                 let Some(to_sparse_trie_task) = to_sparse_trie_task else { return };
 
-                executor.bal_prewarming_pool().install_fn(|| {
+                executor.bal_streaming_pool().install_fn(|| {
                     bal.par_iter().for_each_init(
                         || (ctx.clone(), None::<Box<dyn AccountReader>>),
                         |(ctx, provider), account_changes| {
