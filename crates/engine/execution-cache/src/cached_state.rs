@@ -99,34 +99,22 @@ pub struct CachedStateProvider<S, const PREWARM: bool = false> {
     /// The caches used for the provider
     caches: ExecutionCache,
 
-    /// Metrics for the cached state provider
-    metrics: CachedStateMetrics,
-
     /// Optional cache statistics for detailed block logging. Only tracked when slow block
     /// threshold is configured.
     cache_stats: Option<Arc<CacheStats>>,
 }
 
 impl<S> CachedStateProvider<S> {
-    /// Creates a new [`CachedStateProvider`] from an [`ExecutionCache`], state provider, and
-    /// [`CachedStateMetrics`].
-    pub const fn new(
-        state_provider: S,
-        caches: ExecutionCache,
-        metrics: CachedStateMetrics,
-    ) -> Self {
-        Self { state_provider, caches, metrics, cache_stats: None }
+    /// Creates a new [`CachedStateProvider`] from an [`ExecutionCache`] and state provider.
+    pub const fn new(state_provider: S, caches: ExecutionCache) -> Self {
+        Self { state_provider, caches, cache_stats: None }
     }
 }
 
 impl<S> CachedStateProvider<S, true> {
     /// Creates a new [`CachedStateProvider`] with prewarming enabled.
-    pub const fn new_prewarm(
-        state_provider: S,
-        caches: ExecutionCache,
-        metrics: CachedStateMetrics,
-    ) -> Self {
-        Self { state_provider, caches, metrics, cache_stats: None }
+    pub const fn new_prewarm(state_provider: S, caches: ExecutionCache) -> Self {
+        Self { state_provider, caches, cache_stats: None }
     }
 }
 
@@ -974,8 +962,7 @@ mod tests {
         provider.extend_accounts(vec![(address, account)]);
 
         let caches = ExecutionCache::new(1000);
-        let state_provider =
-            CachedStateProvider::new(provider, caches, CachedStateMetrics::zeroed());
+        let state_provider = CachedStateProvider::new(provider, caches);
 
         let res = state_provider.storage(address, storage_key);
         assert!(res.is_ok());
@@ -994,8 +981,7 @@ mod tests {
         provider.extend_accounts(vec![(address, account)]);
 
         let caches = ExecutionCache::new(1000);
-        let state_provider =
-            CachedStateProvider::new(provider, caches, CachedStateMetrics::zeroed());
+        let state_provider = CachedStateProvider::new(provider, caches);
 
         let res = state_provider.storage(address, storage_key);
         assert!(res.is_ok());
