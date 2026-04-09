@@ -236,9 +236,23 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
                 });
             }
             Subcommands::MigrateV2(command) => {
+                let needs_compact;
                 db_exec!(self.env, tool, N, AccessRights::RW, {
-                    command.execute(&tool)?;
+                    needs_compact = command.execute(&tool)?;
+
+                    // Compaction must happen while we still hold the DB handle
+                    // (mdbx_env_copy works on a live database). The compacted
+                    // copy is written to `db_compact/` next to the original.
+                    if needs_compact {
+                        migrate_v2::Command::compact_mdbx(tool.provider_factory.db_ref())?;
+                    }
                 });
+
+                // After the DB handle is dropped, swap the compacted copy in.
+                if needs_compact {
+                    let compact_path = db_path.with_file_name("db_compact");
+                    migrate_v2::Command::swap_compacted_db(&db_path, &compact_path)?;
+                }
             }
         }
 

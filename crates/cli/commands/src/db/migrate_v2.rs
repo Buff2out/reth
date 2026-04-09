@@ -12,7 +12,10 @@
 //! Then updates `StorageSettings` to v2.
 
 use clap::Parser;
-use reth_db::models::StorageBeforeTx;
+use reth_db::{
+    mdbx::{self, ffi},
+    models::StorageBeforeTx,
+};
 use reth_db_api::{
     cursor::DbCursorRO,
     database::Database,
@@ -29,6 +32,7 @@ use reth_provider::{
 use reth_stages_types::StageId;
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::StageCheckpointReader;
+use std::path::PathBuf;
 use tracing::info;
 
 /// `reth db migrate-v2` command
@@ -41,7 +45,11 @@ pub struct Command {
 
 impl Command {
     /// Execute the migration.
-    pub fn execute<N: ProviderNodeTypes>(self, tool: &DbTool<N>) -> eyre::Result<()>
+    ///
+    /// Returns `true` if MDBX tables were pruned and the database should be
+    /// compacted. The caller should run [`Self::compact_mdbx`] and
+    /// [`Self::swap_compacted_db`] after dropping the database handle.
+    pub fn execute<N: ProviderNodeTypes>(self, tool: &DbTool<N>) -> eyre::Result<bool>
     where
         N::Primitives: reth_primitives_traits::NodePrimitives<
             Receipt: reth_db_api::table::Value + reth_codecs::Compact,
@@ -55,7 +63,7 @@ impl Command {
 
         if current_settings.is_some_and(|s| s.is_v2()) {
             info!(target: "reth::cli", "Storage is already v2, nothing to do");
-            return Ok(());
+            return Ok(false);
         }
 
         let tip =
@@ -131,6 +139,34 @@ impl Command {
         }
 
         info!(target: "reth::cli", "Migration complete!");
+        Ok(self.prune_mdbx)
+    }
+
+    /// Swaps the original MDBX database with a compacted copy.
+    ///
+    /// Must be called after the database handle has been dropped.
+    pub fn swap_compacted_db(
+        db_path: &std::path::Path,
+        compact_path: &std::path::Path,
+    ) -> eyre::Result<()> {
+        let backup_path = db_path.with_file_name("db_pre_compact");
+
+        info!(target: "reth::cli", ?db_path, ?compact_path, "Swapping compacted database");
+
+        // Rename original → backup
+        std::fs::rename(db_path, &backup_path)?;
+
+        // Rename compacted → original
+        if let Err(e) = std::fs::rename(compact_path, db_path) {
+            // Restore backup on failure
+            let _ = std::fs::rename(&backup_path, db_path);
+            return Err(e.into());
+        }
+
+        // Remove backup
+        std::fs::remove_dir_all(&backup_path)?;
+
+        info!(target: "reth::cli", "Database compaction swap complete");
         Ok(())
     }
 
@@ -433,14 +469,54 @@ impl Command {
             }};
         }
 
+        // Tables migrated to static files
         clear_table!(tables::TransactionSenders);
         clear_table!(tables::AccountChangeSets);
         clear_table!(tables::StorageChangeSets);
+
+        // Tables migrated to RocksDB
         clear_table!(tables::TransactionHashNumbers);
         clear_table!(tables::AccountsHistory);
         clear_table!(tables::StoragesHistory);
 
-        info!(target: "reth::cli", "MDBX tables pruned. Consider running `mdbx_copy -c` to compact the database file.");
+        // Plain state tables superseded by hashed state in v2
+        clear_table!(tables::PlainAccountState);
+        clear_table!(tables::PlainStorageState);
+
+        info!(target: "reth::cli", "MDBX tables pruned");
         Ok(())
+    }
+
+    /// Creates a compacted copy of the MDBX database to `<db_path>/../db_compact/`.
+    ///
+    /// Returns the path to the compacted copy. The caller must swap it with the
+    /// original after dropping the database handle.
+    pub fn compact_mdbx(db: &mdbx::DatabaseEnv) -> eyre::Result<PathBuf> {
+        let db_path = db.path();
+        let compact_path = db_path.with_file_name("db_compact");
+
+        reth_fs_util::create_dir_all(&compact_path)?;
+
+        info!(target: "reth::cli", ?db_path, ?compact_path, "Compacting MDBX database");
+
+        let compact_dest = compact_path.join("mdbx.dat");
+        let dest_cstr = std::ffi::CString::new(
+            compact_dest.to_str().ok_or_else(|| eyre::eyre!("compact path must be valid UTF-8"))?,
+        )?;
+
+        let flags = ffi::MDBX_CP_COMPACT | ffi::MDBX_CP_FORCE_DYNAMIC_SIZE;
+
+        let rc = db.with_raw_env_ptr(|env_ptr| unsafe {
+            ffi::mdbx_env_copy(env_ptr, dest_cstr.as_ptr(), flags)
+        });
+
+        if rc != 0 {
+            eyre::bail!("mdbx_env_copy failed with error code {rc}: {}", unsafe {
+                std::ffi::CStr::from_ptr(ffi::mdbx_strerror(rc)).to_string_lossy()
+            });
+        }
+
+        info!(target: "reth::cli", "MDBX compaction complete");
+        Ok(compact_path)
     }
 }
