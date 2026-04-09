@@ -1,13 +1,8 @@
 //! BAL (Block Access List, EIP-7928) related functionality.
 
-use alloy_consensus::constants::KECCAK_EMPTY;
 use alloy_eip7928::BlockAccessList;
-use alloy_primitives::{keccak256, Address, StorageKey, U256};
-use reth_primitives_traits::Account;
-use reth_provider::{AccountReader, ProviderError};
-use reth_trie::{HashedPostState, HashedStorage};
+use alloy_primitives::{Address, StorageKey};
 use std::ops::Range;
-use tracing::debug_span;
 
 /// Returns the total number of storage slots (both changed and read-only) across all accounts in
 /// the BAL.
@@ -116,13 +111,19 @@ impl<'a> Iterator for BALSlotIter<'a> {
 
 /// Converts a Block Access List into a [`HashedPostState`] by extracting the final state
 /// of modified accounts and storage slots.
+#[cfg(test)]
 pub(crate) fn bal_to_hashed_post_state<P>(
     bal: &BlockAccessList,
     provider: P,
-) -> Result<HashedPostState, ProviderError>
+) -> Result<reth_trie::HashedPostState, reth_provider::ProviderError>
 where
-    P: AccountReader,
+    P: reth_provider::AccountReader,
 {
+    use alloy_consensus::constants::KECCAK_EMPTY;
+    use alloy_primitives::keccak256;
+    use reth_primitives_traits::Account;
+    use reth_trie::{HashedPostState, HashedStorage};
+    use tracing::debug_span;
     let _span = debug_span!(
         target: "engine::tree::payload_processor::prewarm",
         "bal_to_hashed_post_state",
