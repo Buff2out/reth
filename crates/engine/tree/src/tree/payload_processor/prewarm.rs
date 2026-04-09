@@ -422,8 +422,9 @@ where
 
         let Some(to_multi_proof) = self.to_multi_proof.as_ref() else { return };
 
-        self.executor.prewarming_pool().install_fn(|| {
-            bal.par_iter().for_each(|account_changes| {
+        // Pure compute (keccak256 hashing) — no DB access, no need for the prewarming pool.
+        // Use the global rayon pool to avoid contending with prewarm-bal storage prefetch.
+        bal.par_iter().for_each(|account_changes| {
                 if account_changes.storage_changes.is_empty() {
                     return;
                 }
@@ -444,7 +445,6 @@ where
                 let _ =
                     to_multi_proof.send(StateRootMessage::HashedStateUpdate(hashed_state));
             });
-        });
     }
 
     /// Spawns a background task that reads accounts from the BAL through a
