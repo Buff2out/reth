@@ -349,52 +349,69 @@ where
         let ctx = &self.ctx;
         let to_sparse_trie_task = self.to_sparse_trie_task.as_ref();
         let executor = &self.executor;
+        let parent_span = Span::current();
+        let prefetch_parent_span = parent_span.clone();
+        let stream_parent_span = parent_span.clone();
+        let prefetch_bal = Arc::clone(&bal);
+        let stream_bal = Arc::clone(&bal);
 
         rayon::join(
-            || {
-                let _span = debug_span!(
+            move || {
+                let branch_span = debug_span!(
                     target: "engine::tree::payload_processor::prewarm",
+                    parent: &prefetch_parent_span,
                     "bal_prefetch_storage",
-                    bal_accounts = bal.len(),
-                )
-                .entered();
+                    bal_accounts = prefetch_bal.len(),
+                );
+                let provider_parent_span = branch_span.clone();
+                let _span = branch_span.entered();
 
                 if ctx.saved_cache.is_none() {
                     return;
                 }
 
-                executor.prewarming_pool().install_fn(|| {
-                    bal.par_iter().for_each_init(
+                executor.prewarming_pool().install_fn(move || {
+                    prefetch_bal.par_iter().for_each_init(
                         || {
                             (
                                 ctx.clone(),
                                 None::<CachedStateProvider<reth_provider::StateProviderBox, true>>,
+                                provider_parent_span.clone(),
                             )
                         },
-                        |(ctx, provider), account| {
+                        |(ctx, provider, parent_span), account| {
                             if ctx.should_stop() {
                                 return;
                             }
-                            ctx.prefetch_bal_storage(provider, account);
+                            ctx.prefetch_bal_storage(parent_span, provider, account);
                         },
                     );
                 });
             },
-            || {
-                let _span = debug_span!(
+            move || {
+                let branch_span = debug_span!(
                     target: "engine::tree::payload_processor::prewarm",
+                    parent: &stream_parent_span,
                     "bal_hashed_state_stream",
-                    bal_accounts = bal.len(),
-                )
-                .entered();
+                    bal_accounts = stream_bal.len(),
+                );
+                let provider_parent_span = branch_span.clone();
+                let _span = branch_span.entered();
 
                 let Some(to_sparse_trie_task) = to_sparse_trie_task else { return };
 
-                executor.bal_streaming_pool().install_fn(|| {
-                    bal.par_iter().for_each_init(
-                        || (ctx.clone(), None::<Box<dyn AccountReader>>),
-                        |(ctx, provider), account_changes| {
+                executor.bal_streaming_pool().install_fn(move || {
+                    stream_bal.par_iter().for_each_init(
+                        || {
+                            (
+                                ctx.clone(),
+                                None::<Box<dyn AccountReader>>,
+                                provider_parent_span.clone(),
+                            )
+                        },
+                        |(ctx, provider, parent_span), account_changes| {
                             ctx.send_bal_hashed_state(
+                                parent_span,
                                 provider,
                                 account_changes,
                                 to_sparse_trie_task,
@@ -597,6 +614,7 @@ where
     /// thread.
     fn send_bal_hashed_state(
         &self,
+        parent_span: &Span,
         provider: &mut Option<Box<dyn AccountReader>>,
         account_changes: &alloy_eip7928::AccountChanges,
         to_sparse_trie_task: &CrossbeamSender<StateRootMessage>,
@@ -618,6 +636,14 @@ where
         }
 
         if provider.is_none() {
+            let _span = debug_span!(
+                target: "engine::tree::payload_processor::prewarm",
+                parent: parent_span,
+                "bal_hashed_state_provider_init",
+                has_saved_cache = self.saved_cache.is_some(),
+            )
+            .entered();
+
             let inner = match self.provider.build() {
                 Ok(p) => p,
                 Err(err) => {
@@ -695,6 +721,7 @@ where
     /// thread.
     fn prefetch_bal_storage(
         &self,
+        parent_span: &Span,
         provider: &mut Option<CachedStateProvider<reth_provider::StateProviderBox, true>>,
         account: &alloy_eip7928::AccountChanges,
     ) {
@@ -705,6 +732,13 @@ where
         let state_provider = match provider {
             Some(p) => p,
             slot @ None => {
+                let _span = debug_span!(
+                    target: "engine::tree::payload_processor::prewarm",
+                    parent: parent_span,
+                    "bal_prefetch_provider_init",
+                )
+                .entered();
+
                 let built = match self.provider.build() {
                     Ok(p) => p,
                     Err(err) => {
