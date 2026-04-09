@@ -26,6 +26,12 @@ pub struct DebugArgs {
     #[arg(long = "debug.max-block", help_heading = "Debug")]
     pub max_block: Option<u64>,
 
+    /// Caps the pipeline target to N blocks ahead of the current checkpoint per run.
+    ///
+    /// All stages process the same N-block chunk sequentially before advancing.
+    #[arg(long = "debug.max-blocks-per-run", help_heading = "Debug")]
+    pub max_blocks_per_run: Option<u64>,
+
     /// Runs a fake consensus client that advances the chain using recent block hashes
     /// on Etherscan. If specified, requires an `ETHERSCAN_API_KEY` environment variable.
     #[arg(
@@ -116,6 +122,7 @@ impl Default for DebugArgs {
             terminate: false,
             tip: None,
             max_block: None,
+            max_blocks_per_run: None,
             etherscan: None,
             rpc_consensus_url: None,
             skip_fcu: None,

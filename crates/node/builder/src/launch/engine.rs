@@ -155,6 +155,7 @@ impl EngineNodeLauncher {
             ctx.sync_metrics_tx(),
             ctx.prune_config(),
             max_block,
+            ctx.node_config().debug.max_blocks_per_run,
             static_file_producer,
             ctx.components().evm_config().clone(),
             maybe_exex_manager_handle.clone().unwrap_or_else(ExExManagerHandle::empty),

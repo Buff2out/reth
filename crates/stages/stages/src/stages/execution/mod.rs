@@ -92,9 +92,6 @@ where
     post_unwind_commit_input: Option<Chain<E::Primitives>>,
     /// Handle to communicate with `ExEx` manager.
     exex_manager_handle: ExExManagerHandle<E::Primitives>,
-    /// The first block of the current pipeline run, used to track cumulative progress
-    /// across batches for `max_blocks_per_run`.
-    run_start_block: Option<BlockNumber>,
     /// Executor metrics.
     metrics: ExecutorMetrics,
 }
@@ -119,7 +116,6 @@ where
             post_execute_commit_input: None,
             post_unwind_commit_input: None,
             exex_manager_handle,
-            run_start_block: None,
             metrics: ExecutorMetrics::default(),
         }
     }
@@ -302,7 +298,6 @@ where
 
         let start_block = input.next_block();
         let max_block = input.target();
-        let run_start_block = *self.run_start_block.get_or_insert(start_block);
         let static_file_provider = provider.static_file_provider();
 
         self.ensure_consistency(provider, input.checkpoint().block_number, None)?;
@@ -512,13 +507,7 @@ where
             "Execution time"
         );
 
-        let done = stage_progress == max_block ||
-            self.thresholds
-                .max_blocks_per_run
-                .is_some_and(|limit| stage_progress - run_start_block + 1 >= limit);
-        if done {
-            self.run_start_block = None;
-        }
+        let done = stage_progress == max_block;
         Ok(ExecOutput {
             checkpoint: StageCheckpoint::new(stage_progress)
                 .with_execution_stage_checkpoint(stage_checkpoint),

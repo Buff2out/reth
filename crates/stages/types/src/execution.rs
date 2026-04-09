@@ -14,16 +14,6 @@ pub struct ExecutionStageThresholds {
     pub max_cumulative_gas: Option<u64>,
     /// The maximum spent on blocks processing before the execution stage commits.
     pub max_duration: Option<Duration>,
-    /// The maximum number of blocks to execute before the execution stage reports `done`,
-    /// forcing the full pipeline (including Merkle verification) to run for each chunk.
-    ///
-    /// When set, the execution stage will return `done: true` after processing this many blocks
-    /// even if the target has not been reached. This causes the pipeline to advance through all
-    /// subsequent stages (hashing, merkle, etc.) before continuing execution, effectively
-    /// enabling per-batch state root verification.
-    ///
-    /// This is primarily useful for debugging state corruption issues.
-    pub max_blocks_per_run: Option<u64>,
 }
 
 impl Default for ExecutionStageThresholds {
@@ -35,7 +25,6 @@ impl Default for ExecutionStageThresholds {
             max_cumulative_gas: Some(30_000_000 * 50_000),
             // 10 minutes
             max_duration: Some(Duration::from_secs(10 * 60)),
-            max_blocks_per_run: None,
         }
     }
 }

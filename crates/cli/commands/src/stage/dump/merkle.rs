@@ -110,7 +110,6 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
             max_changes: None,
             max_cumulative_gas: None,
             max_duration: None,
-            max_blocks_per_run: None,
         },
         MERKLE_STAGE_DEFAULT_REBUILD_THRESHOLD,
         ExExManagerHandle::empty(),

@@ -73,6 +73,8 @@ pub struct Pipeline<N: ProviderNodeTypes> {
     stages: Vec<BoxedStage<<ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW>>,
     /// The maximum block number to sync to.
     max_block: Option<BlockNumber>,
+    /// The maximum number of blocks to process per pipeline run loop iteration.
+    max_blocks_per_run: Option<BlockNumber>,
     static_file_producer: StaticFileProducer<ProviderFactory<N>>,
     /// Sender for events the pipeline emits.
     event_sender: EventSender<PipelineEvent>,
@@ -453,6 +455,15 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
         let target = match (self.max_block, previous_stage) {
             (Some(max_block), Some(prev)) => Some(max_block.min(prev)),
             (a, b) => a.or(b),
+        };
+
+        let target = if let Some(max_blocks_per_run) = self.max_blocks_per_run {
+            let current_checkpoint = self.provider_factory.get_stage_checkpoint(stage_id)?;
+            let current = current_checkpoint.map(|c| c.block_number).unwrap_or(0);
+            let capped = current + max_blocks_per_run;
+            target.map(|t| t.min(capped))
+        } else {
+            target
         };
 
         loop {

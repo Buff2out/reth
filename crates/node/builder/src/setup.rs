@@ -38,6 +38,7 @@ pub fn build_networked_pipeline<N, Client, Evm>(
     metrics_tx: reth_stages::MetricEventsSender,
     prune_config: PruneConfig,
     max_block: Option<BlockNumber>,
+    max_blocks_per_run: Option<u64>,
     static_file_producer: StaticFileProducer<ProviderFactory<N>>,
     evm_config: Evm,
     exex_manager_handle: ExExManagerHandle<N::Primitives>,
@@ -64,6 +65,7 @@ where
         body_downloader,
         consensus,
         max_block,
+        max_blocks_per_run,
         metrics_tx,
         prune_config,
         static_file_producer,
@@ -84,6 +86,7 @@ pub fn build_pipeline<N, H, B, Evm>(
     body_downloader: B,
     consensus: Arc<dyn FullConsensus<N::Primitives>>,
     max_block: Option<u64>,
+    max_blocks_per_run: Option<u64>,
     metrics_tx: reth_stages::MetricEventsSender,
     prune_config: PruneConfig,
     static_file_producer: StaticFileProducer<ProviderFactory<N>>,
@@ -102,6 +105,11 @@ where
     if let Some(max_block) = max_block {
         debug!(target: "reth::cli", max_block, "Configuring builder to use max block");
         builder = builder.with_max_block(max_block)
+    }
+
+    if let Some(max_blocks_per_run) = max_blocks_per_run {
+        debug!(target: "reth::cli", max_blocks_per_run, "Configuring builder to use max blocks per run");
+        builder = builder.with_max_blocks_per_run(max_blocks_per_run)
     }
 
     let (tip_tx, tip_rx) = watch::channel(B256::ZERO);
