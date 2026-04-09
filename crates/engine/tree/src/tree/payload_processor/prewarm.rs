@@ -12,7 +12,7 @@
 //! 3. When actual block execution happens, it benefits from the warmed cache
 
 use crate::tree::{
-    payload_processor::{bal, bal::AccountReaderFactory, multiproof::StateRootMessage},
+    payload_processor::{bal, multiproof::StateRootMessage},
     precompile_cache::{CachedPrecompile, PrecompileCacheMap},
     CachedStateProvider, ExecutionEnv, PayloadExecutionCache, SavedCache, StateProviderBuilder,
 };
@@ -39,16 +39,6 @@ use std::sync::{
     Arc,
 };
 use tracing::{debug, debug_span, instrument, trace, trace_span, warn, Span};
-
-impl<N, P> AccountReaderFactory for &StateProviderBuilder<N, P>
-where
-    N: NodePrimitives,
-    P: BlockReader + StateProviderFactory + StateReader + Clone,
-{
-    fn build_reader(&self) -> Result<Box<dyn AccountReader>, reth_provider::ProviderError> {
-        self.build().map(|p| Box::new(p) as Box<dyn AccountReader>)
-    }
-}
 
 /// Determines the prewarming mode: transaction-based, BAL-based, or skipped.
 #[derive(Debug)]
@@ -331,8 +321,12 @@ where
 
     /// Spawns BAL-based prewarming on a background task.
     ///
-    /// The task uses the prewarming pool's parallel iterator to prefetch accounts and storage
+    /// The task uses the prewarming pool's parallel iterator to prefetch storage
     /// slots, then forwards the BAL-owned hashed state to the multiproof task.
+    ///
+    /// Account reads are done by [`Self::send_bal_hashed_state`] through a
+    /// [`CachedStateProvider`] so they populate the execution cache once and
+    /// are not duplicated by the prewarm task.
     #[instrument(level = "debug", target = "engine::tree::payload_processor::prewarm", skip_all)]
     fn run_bal_prewarm(
         &self,
@@ -383,14 +377,14 @@ where
                         if ctx.should_stop() {
                             return;
                         }
-                        ctx.prefetch_bal_account(provider, account);
+                        ctx.prefetch_bal_storage(provider, account);
                     },
                 );
             });
 
             trace!(
                 target: "engine::tree::payload_processor::prewarm",
-                "All BAL prewarm accounts completed"
+                "All BAL prewarm storage completed"
             );
 
             // Signal that execution has finished.
@@ -406,7 +400,8 @@ where
     /// Converts the BAL to [`HashedPostState`](reth_trie::HashedPostState) and sends it to the
     /// multiproof task.
     ///
-    /// Uses the prewarming pool to parallelize DB reads across accounts.
+    /// Reads accounts through a [`CachedStateProvider`] to populate the execution cache,
+    /// so the main execution path gets cache hits instead of cold DB reads.
     fn send_bal_hashed_state(&self, bal: &BlockAccessList) {
         let _span = debug_span!(
             target: "engine::tree::payload_processor::prewarm",
@@ -417,28 +412,53 @@ where
 
         let Some(to_multi_proof) = self.to_multi_proof.as_ref() else { return };
 
+        let provider: Box<dyn AccountReader> =
+            if let Some(saved_cache) = &self.ctx.saved_cache {
+                match self.ctx.provider.build() {
+                    Ok(inner) => {
+                        let caches = saved_cache.cache().clone();
+                        let cache_metrics = saved_cache.metrics().clone();
+                        Box::new(CachedStateProvider::new(inner, caches, cache_metrics))
+                    }
+                    Err(err) => {
+                        warn!(
+                            target: "engine::tree::payload_processor::prewarm",
+                            ?err,
+                            "Failed to build cached provider for BAL hashed state conversion"
+                        );
+                        return;
+                    }
+                }
+            } else {
+                match self.ctx.provider.build() {
+                    Ok(inner) => Box::new(inner),
+                    Err(err) => {
+                        warn!(
+                            target: "engine::tree::payload_processor::prewarm",
+                            ?err,
+                            "Failed to build provider for BAL hashed state conversion"
+                        );
+                        return;
+                    }
+                }
+            };
+
         let hashed_state = {
             let _span = debug_span!(
                 target: "engine::tree::payload_processor::prewarm",
-                "send_bal_hashed_state::par_bal_to_hashed_post_state",
+                "send_bal_hashed_state::bal_to_hashed_post_state",
             )
             .entered();
-
-            let provider_builder = &self.ctx.provider;
-            self.executor.prewarming_pool().install_fn(|| {
-                bal::par_bal_to_hashed_post_state(bal, provider_builder)
-            })
-        };
-
-        let hashed_state = match hashed_state {
-            Ok(state) => state,
-            Err(err) => {
-                warn!(
-                    target: "engine::tree::payload_processor::prewarm",
-                    ?err,
-                    "Failed to convert BAL to hashed state"
-                );
-                return;
+            match bal::bal_to_hashed_post_state(bal, &*provider) {
+                Ok(state) => state,
+                Err(err) => {
+                    warn!(
+                        target: "engine::tree::payload_processor::prewarm",
+                        ?err,
+                        "Failed to convert BAL to hashed state"
+                    );
+                    return;
+                }
             }
         };
 
@@ -631,15 +651,23 @@ where
         self.terminate_execution.store(true, Ordering::Relaxed);
     }
 
-    /// Prefetches a single account and all its storage slots from the BAL into the cache.
+    /// Prefetches storage slots for a single BAL account into the cache.
+    ///
+    /// Account reads are handled separately by [`send_bal_hashed_state`] through a
+    /// [`CachedStateProvider`], so this method only warms storage.
     ///
     /// The `provider` is lazily initialized on first call and reused across accounts on the same
     /// thread.
-    fn prefetch_bal_account(
+    fn prefetch_bal_storage(
         &self,
         provider: &mut Option<CachedStateProvider<reth_provider::StateProviderBox>>,
         account: &alloy_eip7928::AccountChanges,
     ) {
+        // Skip accounts with no storage slots to prefetch.
+        if account.storage_changes.is_empty() && account.storage_reads.is_empty() {
+            return;
+        }
+
         let state_provider = match provider {
             Some(p) => p,
             slot @ None => {
@@ -663,8 +691,6 @@ where
         };
 
         let start = Instant::now();
-
-        let _ = state_provider.basic_account(&account.address);
 
         for slot in &account.storage_changes {
             let _ = state_provider.storage(account.address, StorageKey::from(slot.slot));
