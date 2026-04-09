@@ -26,7 +26,7 @@
 #
 # The script delegates to the existing bench-reth-*.sh scripts in the reth
 # repo for the actual build, snapshot, and run steps.
-set -euo pipefail
+set -euxo pipefail
 
 # ── PATH ──────────────────────────────────────────────────────────────
 # Ensure cargo and user-local bins (mc, uv) are visible
@@ -401,12 +401,7 @@ echo "▸ Pre-flight cleanup..."
 pkill -f bench-metrics-proxy 2>/dev/null || true
 sudo systemctl stop "${RETH_SCOPE:-reth-bench.scope}" 2>/dev/null || true
 sudo systemctl reset-failed "${RETH_SCOPE:-reth-bench.scope}" 2>/dev/null || true
-sudo pkill -9 reth 2>/dev/null || true
-sleep 1
-if mountpoint -q "$SCHELK_MOUNT" 2>/dev/null; then
-  sudo umount -l "$SCHELK_MOUNT" 2>/dev/null || true
-  sudo schelk recover -y --kill 2>/dev/null || true
-fi
+sudo schelk recover -y --kill || sudo schelk full-recover -y || true
 echo
 
 # ── Step 7: Interleaved benchmark runs (B-F-F-B) ────────────────────

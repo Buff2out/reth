@@ -14,7 +14,7 @@
 #               BENCH_OTLP_TRACES_ENDPOINT (OTLP HTTP endpoint for traces, e.g. https://host/insert/opentelemetry/v1/traces)
 #               BENCH_OTLP_LOGS_ENDPOINT (OTLP HTTP endpoint for logs, e.g. https://host/insert/opentelemetry/v1/logs)
 #               BENCH_OTLP_DISABLED (true to skip OTLP export even if endpoints are set)
-set -euo pipefail
+set -euxo pipefail
 
 LABEL="$1"
 BINARY="$2"
@@ -78,7 +78,7 @@ cleanup() {
   sudo chown -R "$(id -un):$(id -gn)" "$OUTPUT_DIR" 2>/dev/null || true
   # Let schelk recover the mounted volume in place so dm-era can restore only
   # the changed blocks and clean up its own state.
-  mountpoint -q "$SCHELK_MOUNT" && sudo schelk recover -y --kill || true
+  sudo schelk recover -y --kill || true
 }
 TAIL_PID=
 TRACY_PID=
