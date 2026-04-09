@@ -25,13 +25,13 @@ use reth_node_core::args::DefaultPruningValues;
 use reth_prune_types::PruneMode;
 use std::{
     borrow::Cow,
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs::OpenOptions,
     io::{self, BufWriter, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, OnceLock,
+        Arc, Condvar, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -49,14 +49,25 @@ const EXTENSION_TAR_LZ4: &str = ".tar.lz4";
 const EXTENSION_TAR_ZSTD: &str = ".tar.zst";
 const DOWNLOAD_CACHE_DIR: &str = ".download-cache";
 
-/// Maximum number of concurrent archive downloads.
+/// Maximum number of simultaneous HTTP downloads across the entire snapshot job.
 const MAX_CONCURRENT_DOWNLOADS: usize = 8;
-
-/// Default number of parallel segments per individual file download.
-const DEFAULT_DOWNLOAD_SEGMENTS: usize = 16;
 
 /// Maximum retry attempts for a single download segment.
 const SEGMENT_RETRY_ATTEMPTS: u32 = 3;
+
+/// Minimum archive size that benefits from segmented downloads.
+const SEGMENTED_DOWNLOAD_MIN_FILE_SIZE: u64 = 128 * 1024 * 1024;
+
+/// Piece sizes are intentionally large to reduce request fanout while still
+/// leaving enough queue depth to saturate fast links.
+const SEGMENTED_DOWNLOAD_SMALL_PIECE_SIZE: u64 = 32 * 1024 * 1024;
+const SEGMENTED_DOWNLOAD_LARGE_PIECE_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Cap exponential piece retry backoff to avoid overly long stalls.
+const SEGMENTED_DOWNLOAD_MAX_BACKOFF_SECS: u64 = 30;
+
+/// Segmented piece requests should fail fast enough to recover from hung tails.
+const SEGMENTED_DOWNLOAD_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SelectionPreset {
@@ -275,17 +286,12 @@ pub struct DownloadCommand<C: ChainSpecParser> {
     #[arg(long)]
     resumable: bool,
 
-    /// Maximum number of concurrent modular archive workers.
+    /// Maximum number of simultaneous HTTP downloads.
+    ///
+    /// Applies across the entire snapshot download. Small files use one slot,
+    /// while large files may use multiple slots by splitting into fixed-size pieces.
     #[arg(long, default_value_t = MAX_CONCURRENT_DOWNLOADS)]
     download_concurrency: usize,
-
-    /// Number of parallel segments per file download.
-    ///
-    /// Uses HTTP Range requests to download each file in parallel segments,
-    /// matching aria2c-style parallelism. Set to 1 to disable segmented
-    /// downloads. Ignored when the server does not support Range requests.
-    #[arg(long, default_value_t = DEFAULT_DOWNLOAD_SEGMENTS)]
-    download_segments: usize,
 
     /// List available snapshots and exit.
     ///
@@ -314,6 +320,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
 
         // Legacy single-URL mode: download one archive and extract it
         if let Some(ref url) = self.url {
+            let request_limiter = DownloadRequestLimiter::new(self.download_concurrency.max(1));
             info!(target: "reth::cli",
                 dir = ?data_dir.data_dir(),
                 url = %url,
@@ -325,7 +332,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
                 data_dir.data_dir(),
                 None,
                 self.resumable,
-                self.download_segments.max(1),
+                Some(request_limiter),
                 cancel_token.clone(),
             )
             .await?;
@@ -398,13 +405,8 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
                 .then_with(|| a.archive.file_name.cmp(&b.archive.file_name))
         });
 
-        let download_cache_dir = if self.resumable || self.download_segments > 1 {
-            let dir = target_dir.join(DOWNLOAD_CACHE_DIR);
-            fs::create_dir_all(&dir)?;
-            Some(dir)
-        } else {
-            None
-        };
+        let download_cache_dir = target_dir.join(DOWNLOAD_CACHE_DIR);
+        fs::create_dir_all(&download_cache_dir)?;
 
         let total_archives = all_downloads.len();
         let total_size: u64 = selections
@@ -429,19 +431,20 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
             "Downloading all archives"
         );
 
+        let download_concurrency = self.download_concurrency.max(1);
         let shared = SharedProgress::new(total_size, total_archives as u64, cancel_token.clone());
+        let request_limiter = DownloadRequestLimiter::new(download_concurrency);
         let progress_handle = spawn_progress_display(Arc::clone(&shared));
 
         let target = target_dir.to_path_buf();
-        let cache_dir = download_cache_dir;
+        let cache_dir = Some(download_cache_dir);
         let resumable = self.resumable;
-        let download_concurrency = self.download_concurrency.max(1);
-        let download_segments = self.download_segments.max(1);
         let results: Vec<Result<()>> = stream::iter(all_downloads)
             .map(|planned| {
                 let dir = target.clone();
                 let cache = cache_dir.clone();
                 let sp = Arc::clone(&shared);
+                let limiter = Arc::clone(&request_limiter);
                 let ct = cancel_token.clone();
                 async move {
                     process_modular_archive(
@@ -450,7 +453,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
                         cache.as_deref(),
                         Some(sp),
                         resumable,
-                        download_segments,
+                        Some(limiter),
                         ct,
                     )
                     .await?;
@@ -873,14 +876,21 @@ impl DownloadProgress {
 
 /// Shared progress counter for parallel downloads.
 ///
-/// Each download thread atomically increments `downloaded`. A single display
-/// task on the main thread reads the counter periodically and prints one
-/// aggregated progress line.
+/// Each download thread atomically increments `fetched_bytes`. Archives that are
+/// successfully verified increment `completed_bytes`. A single display task on
+/// the main thread reads both counters periodically and prints one aggregated
+/// progress line. It also tracks when the job has switched from downloading to
+/// extraction so the logs can reflect the active phase.
 struct SharedProgress {
-    downloaded: AtomicU64,
+    fetched_bytes: AtomicU64,
+    completed_bytes: AtomicU64,
     total_size: u64,
     total_archives: u64,
+    started_at: Instant,
     archives_done: AtomicU64,
+    active_downloads: AtomicU64,
+    active_download_requests: AtomicU64,
+    active_extractions: AtomicU64,
     done: AtomicBool,
     cancel_token: CancellationToken,
 }
@@ -888,10 +898,15 @@ struct SharedProgress {
 impl SharedProgress {
     fn new(total_size: u64, total_archives: u64, cancel_token: CancellationToken) -> Arc<Self> {
         Arc::new(Self {
-            downloaded: AtomicU64::new(0),
+            fetched_bytes: AtomicU64::new(0),
+            completed_bytes: AtomicU64::new(0),
             total_size,
             total_archives,
+            started_at: Instant::now(),
             archives_done: AtomicU64::new(0),
+            active_downloads: AtomicU64::new(0),
+            active_download_requests: AtomicU64::new(0),
+            active_extractions: AtomicU64::new(0),
             done: AtomicBool::new(false),
             cancel_token,
         })
@@ -901,12 +916,142 @@ impl SharedProgress {
         self.cancel_token.is_cancelled()
     }
 
-    fn add(&self, bytes: u64) {
-        self.downloaded.fetch_add(bytes, Ordering::Relaxed);
+    fn add_fetched(&self, bytes: u64) {
+        self.fetched_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn add_completed(&self, bytes: u64) {
+        self.completed_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
     fn archive_done(&self) {
         self.archives_done.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn start_download(&self) {
+        self.active_downloads.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn finish_download(&self) {
+        let _ = self
+            .active_downloads
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+    }
+
+    fn start_request(&self) {
+        self.active_download_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn finish_request(&self) {
+        let _ =
+            self.active_download_requests
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+    }
+
+    fn start_extraction(&self) {
+        self.active_extractions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn finish_extraction(&self) {
+        let _ = self
+            .active_extractions
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+    }
+
+    fn complete_archive(&self, bytes: u64) {
+        self.add_completed(bytes);
+        self.archive_done();
+    }
+}
+
+/// Global request cap for the blocking downloader.
+///
+/// This is effectively a blocking semaphore implemented with `Mutex + Condvar`
+/// because the segmented path uses blocking reqwest clients on OS threads.
+struct DownloadRequestLimiter {
+    limit: usize,
+    active: Mutex<usize>,
+    notify: Condvar,
+}
+
+impl DownloadRequestLimiter {
+    fn new(limit: usize) -> Arc<Self> {
+        Arc::new(Self { limit: limit.max(1), active: Mutex::new(0), notify: Condvar::new() })
+    }
+
+    fn max_concurrency(&self) -> usize {
+        self.limit
+    }
+
+    fn acquire<'a>(
+        &'a self,
+        progress: Option<&'a Arc<SharedProgress>>,
+        cancel_token: &CancellationToken,
+    ) -> Result<DownloadRequestPermit<'a>> {
+        let mut active = self.active.lock().unwrap();
+        loop {
+            if cancel_token.is_cancelled() {
+                return Err(eyre::eyre!("Download cancelled"));
+            }
+
+            if *active < self.limit {
+                *active += 1;
+                if let Some(progress) = progress {
+                    progress.start_request();
+                }
+                return Ok(DownloadRequestPermit { limiter: self, progress });
+            }
+
+            // Wake periodically so cancellation can interrupt waiters even if
+            // no request finishes and signals the condvar.
+            let (next_active, _) =
+                self.notify.wait_timeout(active, Duration::from_millis(100)).unwrap();
+            active = next_active;
+        }
+    }
+}
+
+/// RAII permit for one in-flight HTTP request.
+///
+/// Dropping the permit releases a slot in the global request pool and updates
+/// the live progress counters.
+struct DownloadRequestPermit<'a> {
+    limiter: &'a DownloadRequestLimiter,
+    progress: Option<&'a Arc<SharedProgress>>,
+}
+
+impl Drop for DownloadRequestPermit<'_> {
+    fn drop(&mut self) {
+        let mut active = self.limiter.active.lock().unwrap();
+        *active = active.saturating_sub(1);
+        drop(active);
+        self.limiter.notify.notify_one();
+
+        if let Some(progress) = self.progress {
+            progress.finish_request();
+        }
+    }
+}
+
+/// Marks one archive extraction as active for aggregate progress logging.
+struct ExtractionGuard<'a> {
+    progress: Option<&'a Arc<SharedProgress>>,
+}
+
+impl<'a> ExtractionGuard<'a> {
+    fn new(progress: Option<&'a Arc<SharedProgress>>) -> Self {
+        if let Some(progress) = progress {
+            progress.start_extraction();
+        }
+        Self { progress }
+    }
+}
+
+impl Drop for ExtractionGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(progress) = self.progress {
+            progress.finish_extraction();
+        }
     }
 }
 
@@ -914,8 +1059,8 @@ impl SharedProgress {
 /// Returns a handle; drop it (or call `.abort()`) to stop.
 fn spawn_progress_display(progress: Arc<SharedProgress>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let started_at = Instant::now();
         let mut interval = tokio::time::interval(Duration::from_secs(3));
+        let mut in_extraction_phase = false;
         interval.tick().await; // first tick is immediate, skip it
         loop {
             interval.tick().await;
@@ -924,7 +1069,8 @@ fn spawn_progress_display(progress: Arc<SharedProgress>) -> tokio::task::JoinHan
                 break;
             }
 
-            let downloaded = progress.downloaded.load(Ordering::Relaxed);
+            let fetched = progress.fetched_bytes.load(Ordering::Relaxed);
+            let completed = progress.completed_bytes.load(Ordering::Relaxed);
             let total = progress.total_size;
             if total == 0 {
                 continue;
@@ -932,55 +1078,65 @@ fn spawn_progress_display(progress: Arc<SharedProgress>) -> tokio::task::JoinHan
 
             let done = progress.archives_done.load(Ordering::Relaxed);
             let all = progress.total_archives;
-            let pct = (downloaded as f64 / total as f64) * 100.0;
-            let dl = DownloadProgress::format_size(downloaded);
+            let active_downloads = progress.active_downloads.load(Ordering::Relaxed);
+            let active_requests = progress.active_download_requests.load(Ordering::Relaxed);
+            let active_extractions = progress.active_extractions.load(Ordering::Relaxed);
+            let progress_bytes = fetched.max(completed).min(total);
+            let pct = (progress_bytes as f64 / total as f64) * 100.0;
+            let completed_display = DownloadProgress::format_size(completed);
+            let elapsed = DownloadProgress::format_duration(progress.started_at.elapsed());
+            let fetched_display = DownloadProgress::format_size(fetched);
             let tot = DownloadProgress::format_size(total);
+            let extraction_phase =
+                active_downloads == 0 && active_requests == 0 && active_extractions > 0;
 
-            let elapsed = started_at.elapsed();
-            let remaining = total.saturating_sub(downloaded);
-
-            if remaining == 0 {
-                // Downloads done, waiting for extraction
+            if extraction_phase && !in_extraction_phase {
                 info!(target: "reth::cli",
-                    archives = format_args!("{done}/{all}"),
-                    downloaded = %dl,
-                    "Extracting remaining archives"
+                    elapsed = %elapsed,
+                    active_extractions,
+                    "All snapshot archive downloads complete, starting extraction"
                 );
-            } else {
-                let eta = if downloaded > 0 {
-                    let speed = downloaded as f64 / elapsed.as_secs_f64();
-                    if speed > 0.0 {
-                        DownloadProgress::format_duration(Duration::from_secs_f64(
-                            remaining as f64 / speed,
-                        ))
-                    } else {
-                        "??".to_string()
-                    }
-                } else {
-                    "??".to_string()
-                };
+            }
 
+            in_extraction_phase = extraction_phase;
+
+            if extraction_phase {
                 info!(target: "reth::cli",
                     archives = format_args!("{done}/{all}"),
                     progress = format_args!("{pct:.1}%"),
-                    downloaded = %dl,
+                    elapsed = %elapsed,
+                    active_extractions,
+                    completed = %completed_display,
                     total = %tot,
-                    eta = %eta,
-                    "Downloading"
+                    fetched_this_session = %fetched_display,
+                    "Extracting snapshot archives"
+                );
+            } else {
+                info!(target: "reth::cli",
+                    archives = format_args!("{done}/{all}"),
+                    progress = format_args!("{pct:.1}%"),
+                    elapsed = %elapsed,
+                    active_archive_downloads = active_downloads,
+                    active_download_requests = active_requests,
+                    completed = %completed_display,
+                    total = %tot,
+                    fetched_this_session = %fetched_display,
+                    "Processing snapshot archives"
                 );
             }
         }
 
         // Final line
-        let downloaded = progress.downloaded.load(Ordering::Relaxed);
-        let dl = DownloadProgress::format_size(downloaded);
+        let fetched = progress.fetched_bytes.load(Ordering::Relaxed);
+        let completed = progress.completed_bytes.load(Ordering::Relaxed);
+        let fetched_display = DownloadProgress::format_size(fetched);
+        let completed_display = DownloadProgress::format_size(completed);
         let tot = DownloadProgress::format_size(progress.total_size);
-        let elapsed = DownloadProgress::format_duration(started_at.elapsed());
         info!(target: "reth::cli",
-            downloaded = %dl,
+            completed = %completed_display,
             total = %tot,
-            elapsed = %elapsed,
-            "Downloads complete"
+            fetched_this_session = %fetched_display,
+            "Snapshot archive processing complete"
         );
     })
 }
@@ -1072,10 +1228,14 @@ fn extract_archive_raw<R: Read>(
 ) -> Result<()> {
     match format {
         CompressionFormat::Lz4 => {
-            Archive::new(Decoder::new(reader)?).unpack(target_dir)?;
+            Archive::new(Decoder::new(reader)?).unpack(target_dir).wrap_err_with(|| {
+                format!("failed to extract archive into `{}`", target_dir.display())
+            })?;
         }
         CompressionFormat::Zstd => {
-            Archive::new(ZstdDecoder::new(reader)?).unpack(target_dir)?;
+            Archive::new(ZstdDecoder::new(reader)?).unpack(target_dir).wrap_err_with(|| {
+                format!("failed to extract archive into `{}`", target_dir.display())
+            })?;
         }
     }
     Ok(())
@@ -1139,7 +1299,7 @@ impl<W: Write> Write for SharedProgressWriter<W> {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "download cancelled"));
         }
         let n = self.inner.write(buf)?;
-        self.progress.add(n as u64);
+        self.progress.add_fetched(n as u64);
         Ok(n)
     }
 
@@ -1161,7 +1321,7 @@ impl<R: Read> Read for SharedProgressReader<R> {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "download cancelled"));
         }
         let n = self.inner.read(buf)?;
-        self.progress.add(n as u64);
+        self.progress.add_fetched(n as u64);
         Ok(n)
     }
 }
@@ -1176,6 +1336,7 @@ fn resumable_download(
     url: &str,
     target_dir: &Path,
     shared: Option<&Arc<SharedProgress>>,
+    request_limiter: Option<&Arc<DownloadRequestLimiter>>,
     cancel_token: CancellationToken,
 ) -> Result<(PathBuf, u64)> {
     let file_name = Url::parse(url)
@@ -1228,6 +1389,9 @@ fn resumable_download(
                 info!(target: "reth::cli", file = %file_name, "Resuming from {} bytes", existing_size);
             }
         }
+
+        let _request_permit =
+            request_limiter.map(|limiter| limiter.acquire(shared, &cancel_token)).transpose()?;
 
         let response = match request.send().and_then(|r| r.error_for_status()) {
             Ok(r) => r,
@@ -1288,10 +1452,7 @@ fn resumable_download(
         let flush_result;
 
         if let Some(sp) = shared {
-            // Parallel path: bump shared atomic counter
-            if start_offset > 0 {
-                sp.add(start_offset);
-            }
+            // Parallel path: count only bytes fetched during this invocation.
             let mut writer =
                 SharedProgressWriter { inner: BufWriter::new(file), progress: Arc::clone(sp) };
             copy_result = io::copy(&mut reader, &mut writer);
@@ -1329,105 +1490,262 @@ fn resumable_download(
         .unwrap_or_else(|| eyre::eyre!("Download failed after {} attempts", MAX_DOWNLOAD_RETRIES)))
 }
 
-/// Downloads a single segment of a file using an HTTP Range request.
-///
-/// Writes data at the correct offset in the `.part` file and updates the shared
-/// progress counter. Retries up to [`SEGMENT_RETRY_ATTEMPTS`] times on failure.
-fn download_segment(
-    url: &str,
-    part_path: &Path,
+/// One queued byte range for a segmented archive download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DownloadPiece {
     start: u64,
     end: u64,
+}
+
+/// Static plan for a segmented archive: piece size, queue depth, and worker fanout.
+#[derive(Debug)]
+struct SegmentedDownloadPlan {
+    piece_size: u64,
+    piece_count: usize,
+    worker_count: usize,
+    pieces: VecDeque<DownloadPiece>,
+}
+
+/// Shared queue state for one segmented archive download.
+///
+/// Workers pop pieces until the queue is drained or one worker marks the whole
+/// archive attempt as failed.
+struct SegmentedDownloadState {
+    pieces: Mutex<VecDeque<DownloadPiece>>,
+    failed: AtomicBool,
+}
+
+impl SegmentedDownloadState {
+    fn new(pieces: VecDeque<DownloadPiece>) -> Self {
+        Self { pieces: Mutex::new(pieces), failed: AtomicBool::new(false) }
+    }
+
+    fn next_piece(&self, cancel_token: &CancellationToken) -> Option<DownloadPiece> {
+        if cancel_token.is_cancelled() || self.failed.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        self.pieces.lock().unwrap().pop_front()
+    }
+
+    fn note_terminal_failure(&self) {
+        self.failed.store(true, Ordering::Relaxed);
+    }
+}
+
+fn build_download_pieces(total_size: u64, piece_size: u64) -> VecDeque<DownloadPiece> {
+    let mut pieces = VecDeque::new();
+    let mut start = 0;
+
+    while start < total_size {
+        let end = (start + piece_size).min(total_size) - 1;
+        pieces.push_back(DownloadPiece { start, end });
+        start = end + 1;
+    }
+
+    pieces
+}
+
+/// Chooses the fixed piece size for a large archive.
+///
+/// Smaller large files use 32 MiB pieces to keep enough queue depth. Very large
+/// files use 64 MiB pieces to reduce HTTP request overhead.
+fn segmented_piece_size(total_size: u64) -> u64 {
+    if total_size < 2 * 1024 * 1024 * 1024 {
+        SEGMENTED_DOWNLOAD_SMALL_PIECE_SIZE
+    } else {
+        SEGMENTED_DOWNLOAD_LARGE_PIECE_SIZE
+    }
+}
+
+/// Builds the segmented download plan for one archive.
+///
+/// Small files stay single-stream; otherwise the archive is split into fixed
+/// pieces and allowed to use up to the global request limit.
+fn plan_segmented_download(total_size: u64, max_workers: usize) -> Option<SegmentedDownloadPlan> {
+    if max_workers == 0 || total_size < SEGMENTED_DOWNLOAD_MIN_FILE_SIZE {
+        return None;
+    }
+
+    let piece_size = segmented_piece_size(total_size);
+    if total_size <= piece_size {
+        return None;
+    }
+
+    let pieces = build_download_pieces(total_size, piece_size);
+    let piece_count = pieces.len();
+    let worker_count = max_workers.min(piece_count).max(1);
+
+    Some(SegmentedDownloadPlan { piece_size, piece_count, worker_count, pieces })
+}
+
+fn piece_retry_backoff(attempt: u32, throttled: bool) -> Duration {
+    let base = if throttled { 2 } else { RETRY_BACKOFF_SECS };
+    let multiplier = 1u64 << attempt.saturating_sub(1).min(3);
+    Duration::from_secs(base.saturating_mul(multiplier).min(SEGMENTED_DOWNLOAD_MAX_BACKOFF_SECS))
+}
+
+fn is_retryable_piece_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT |
+            StatusCode::TOO_MANY_REQUESTS |
+            StatusCode::INTERNAL_SERVER_ERROR |
+            StatusCode::BAD_GATEWAY |
+            StatusCode::SERVICE_UNAVAILABLE |
+            StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
+fn should_retry_piece_status(status: StatusCode) -> bool {
+    status == StatusCode::OK || is_retryable_piece_status(status)
+}
+
+fn is_throttle_piece_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT |
+            StatusCode::TOO_MANY_REQUESTS |
+            StatusCode::SERVICE_UNAVAILABLE |
+            StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
+fn is_throttle_piece_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || matches!(error.status(), Some(status) if is_throttle_piece_status(status))
+}
+
+/// Downloads one queued piece with per-piece retry/backoff.
+///
+/// Each attempt acquires a permit from the global request pool so whole-file and
+/// piece downloads compete for the same fixed number of HTTP request slots.
+fn download_piece(
+    client: &BlockingClient,
+    url: &str,
+    file: &std::fs::File,
+    piece: DownloadPiece,
     shared: Option<&Arc<SharedProgress>>,
+    request_limiter: &DownloadRequestLimiter,
     cancel_token: &CancellationToken,
 ) -> Result<()> {
     use std::os::unix::fs::FileExt;
 
-    let expected_len = end - start + 1;
-    let client = BlockingClient::builder()
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(3600))
-        .build()?;
+    let expected_len = piece.end - piece.start + 1;
 
     for attempt in 1..=SEGMENT_RETRY_ATTEMPTS {
         if cancel_token.is_cancelled() {
             return Err(eyre::eyre!("Download cancelled"));
         }
 
+        let _request_permit = request_limiter.acquire(shared, cancel_token)?;
+
         let response = match client
             .get(url)
-            .header(RANGE, format!("bytes={start}-{end}"))
+            .header(RANGE, format!("bytes={}-{}", piece.start, piece.end))
             .send()
-            .and_then(|r| r.error_for_status())
         {
-            Ok(r) => r,
-            Err(e) => {
+            Ok(response) if response.status() == StatusCode::PARTIAL_CONTENT => response,
+            Ok(response) if should_retry_piece_status(response.status()) => {
+                let throttled = is_throttle_piece_status(response.status());
                 if attempt == SEGMENT_RETRY_ATTEMPTS {
-                    return Err(e.into());
+                    return Err(eyre::eyre!(
+                        "Server returned {} for piece {}-{}",
+                        response.status(),
+                        piece.start,
+                        piece.end
+                    ));
                 }
-                std::thread::sleep(Duration::from_secs(RETRY_BACKOFF_SECS));
+
+                std::thread::sleep(piece_retry_backoff(attempt, throttled));
+                continue;
+            }
+            Ok(response) => {
+                return Err(eyre::eyre!(
+                    "Server returned {} instead of 206 for Range request",
+                    response.status()
+                ));
+            }
+            Err(error) => {
+                let throttled = is_throttle_piece_error(&error);
+                if attempt == SEGMENT_RETRY_ATTEMPTS {
+                    return Err(error.into());
+                }
+
+                std::thread::sleep(piece_retry_backoff(attempt, throttled));
                 continue;
             }
         };
 
-        if response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(eyre::eyre!(
-                "Server returned {} instead of 206 for Range request",
-                response.status()
-            ));
-        }
-
-        let file = OpenOptions::new().write(true).open(part_path)?;
-
         let mut buf = [0u8; 64 * 1024];
-        // Cap reads to expected segment length to prevent overwriting adjacent segments
         let mut reader = response.take(expected_len);
-        let mut offset = start;
-        let mut segment_ok = true;
+        let mut offset = piece.start;
+        let mut read_error: Option<(eyre::Error, bool)> = None;
+
         loop {
             if cancel_token.is_cancelled() {
                 return Err(eyre::eyre!("Download cancelled"));
             }
+
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     file.write_all_at(&buf[..n], offset)?;
                     offset += n as u64;
                     if let Some(sp) = shared {
-                        sp.add(n as u64);
+                        sp.add_fetched(n as u64);
                     }
                 }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => {
-                    if attempt == SEGMENT_RETRY_ATTEMPTS {
-                        return Err(e.into());
-                    }
-                    segment_ok = false;
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    let throttled = error.kind() == io::ErrorKind::TimedOut;
+                    read_error = Some((error.into(), throttled));
                     break;
                 }
             }
         }
 
-        if segment_ok {
+        if let Some((error, throttled)) = read_error {
+            if attempt == SEGMENT_RETRY_ATTEMPTS {
+                return Err(error);
+            }
+
+            std::thread::sleep(piece_retry_backoff(attempt, throttled));
+            continue;
+        }
+
+        let downloaded_len = offset - piece.start;
+        if downloaded_len == expected_len {
             return Ok(());
         }
 
-        std::thread::sleep(Duration::from_secs(RETRY_BACKOFF_SECS));
+        if attempt == SEGMENT_RETRY_ATTEMPTS {
+            return Err(eyre::eyre!(
+                "Piece {}-{} ended early: expected {} bytes, downloaded {}",
+                piece.start,
+                piece.end,
+                expected_len,
+                downloaded_len
+            ));
+        }
+
+        std::thread::sleep(piece_retry_backoff(attempt, false));
     }
 
-    Err(eyre::eyre!("Segment download failed after {SEGMENT_RETRY_ATTEMPTS} attempts"))
+    Err(eyre::eyre!("Piece download failed after {SEGMENT_RETRY_ATTEMPTS} attempts"))
 }
 
 /// Downloads a file using parallel HTTP Range requests.
 ///
-/// The file is split into `num_segments` segments that are fetched concurrently
-/// via [`tokio::task::spawn_blocking`]. Falls back to [`resumable_download`]
-/// when the server does not support Range requests or the file is too small.
+/// The file is split into large fixed-size pieces and a bounded worker pool pulls
+/// from the per-file queue. Each piece request acquires a slot from the global
+/// request pool, so small whole-file downloads and large-file pieces all share
+/// the same backpressure mechanism. Falls back to [`resumable_download`] when
+/// the server does not support Range requests or the file is too small.
 fn parallel_segmented_download(
     url: &str,
     target_dir: &Path,
-    num_segments: usize,
     shared: Option<&Arc<SharedProgress>>,
+    request_limiter: &Arc<DownloadRequestLimiter>,
     cancel_token: CancellationToken,
 ) -> Result<(PathBuf, u64)> {
     let file_name = Url::parse(url)
@@ -1468,17 +1786,24 @@ fn parallel_segmented_download(
         info!(target: "reth::cli",
             "Server does not support Range requests, falling back to sequential download"
         );
-        return resumable_download(url, target_dir, shared, cancel_token);
+        return resumable_download(url, target_dir, shared, Some(request_limiter), cancel_token);
     }
 
-    // At least 1 MB per segment to avoid excessive overhead
-    let actual_segments = num_segments.min(total_size as usize / (1024 * 1024)).max(1);
-    let segment_size = total_size / actual_segments as u64;
+    let Some(plan) = plan_segmented_download(total_size, request_limiter.max_concurrency()) else {
+        info!(target: "reth::cli",
+            total_size = %DownloadProgress::format_size(total_size),
+            "Archive too small for segmented download, falling back to single-stream download"
+        );
+        return resumable_download(url, target_dir, shared, Some(request_limiter), cancel_token);
+    };
 
     info!(target: "reth::cli",
         total_size = %DownloadProgress::format_size(total_size),
-        segments = actual_segments,
-        "Starting parallel segmented download"
+        piece_size = %DownloadProgress::format_size(plan.piece_size),
+        pieces = plan.piece_count,
+        workers = plan.worker_count,
+        max_concurrent_requests = request_limiter.max_concurrency(),
+        "Starting queued segmented download"
     );
 
     // Pre-allocate the .part file
@@ -1488,29 +1813,45 @@ fn parallel_segmented_download(
     }
 
     let url = url.to_string();
+    let state = Arc::new(SegmentedDownloadState::new(plan.pieces));
     let errors: Arc<std::sync::Mutex<Vec<eyre::Error>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
+    let worker_client = BlockingClient::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(SEGMENTED_DOWNLOAD_REQUEST_TIMEOUT_SECS))
+        .build()?;
 
-    // Download segments in parallel using a scoped thread pool
+    // Download queued pieces in parallel using a scoped thread pool.
     std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(actual_segments);
+        let mut handles = Vec::with_capacity(plan.worker_count);
 
-        for i in 0..actual_segments {
-            let start = i as u64 * segment_size;
-            let end = if i == actual_segments - 1 {
-                total_size - 1
-            } else {
-                (i as u64 + 1) * segment_size - 1
-            };
-
+        for _ in 0..plan.worker_count {
             let url = &url;
             let part_path = &part_path;
+            let state = Arc::clone(&state);
             let errors = Arc::clone(&errors);
+            let client = worker_client.clone();
+            let request_limiter = Arc::clone(request_limiter);
             let ct = &cancel_token;
 
             handles.push(scope.spawn(move || {
-                if let Err(e) = download_segment(url, part_path, start, end, shared, ct) {
-                    errors.lock().unwrap().push(e);
+                let file = match OpenOptions::new().write(true).open(part_path) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        state.note_terminal_failure();
+                        errors.lock().unwrap().push(error.into());
+                        return;
+                    }
+                };
+
+                while let Some(piece) = state.next_piece(ct) {
+                    if let Err(error) =
+                        download_piece(&client, url, &file, piece, shared, &request_limiter, ct)
+                    {
+                        state.note_terminal_failure();
+                        errors.lock().unwrap().push(error);
+                        return;
+                    }
                 }
             }));
         }
@@ -1542,6 +1883,7 @@ fn streaming_download_and_extract(
     format: CompressionFormat,
     target_dir: &Path,
     shared: Option<&Arc<SharedProgress>>,
+    request_limiter: Option<&Arc<DownloadRequestLimiter>>,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let quiet = shared.is_some();
@@ -1558,6 +1900,8 @@ fn streaming_download_and_extract(
         }
 
         let client = BlockingClient::builder().connect_timeout(Duration::from_secs(30)).build()?;
+        let _request_permit =
+            request_limiter.map(|limiter| limiter.acquire(shared, &cancel_token)).transpose()?;
 
         let response = match client.get(url).send().and_then(|r| r.error_for_status()) {
             Ok(r) => r,
@@ -1627,21 +1971,17 @@ fn download_and_extract(
     format: CompressionFormat,
     target_dir: &Path,
     shared: Option<&Arc<SharedProgress>>,
-    download_segments: usize,
+    request_limiter: &Arc<DownloadRequestLimiter>,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let quiet = shared.is_some();
-    let (downloaded_path, total_size) = if download_segments > 1 {
-        parallel_segmented_download(
-            url,
-            target_dir,
-            download_segments,
-            shared,
-            cancel_token.clone(),
-        )?
-    } else {
-        resumable_download(url, target_dir, shared, cancel_token.clone())?
-    };
+    let (downloaded_path, total_size) = parallel_segmented_download(
+        url,
+        target_dir,
+        shared,
+        request_limiter,
+        cancel_token.clone(),
+    )?;
 
     let file_name =
         downloaded_path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
@@ -1669,7 +2009,7 @@ fn download_and_extract(
     fs::remove_file(&downloaded_path)?;
 
     if let Some(sp) = shared {
-        sp.archive_done();
+        sp.complete_archive(total_size);
     }
 
     Ok(())
@@ -1685,7 +2025,7 @@ fn blocking_download_and_extract(
     target_dir: &Path,
     shared: Option<Arc<SharedProgress>>,
     resumable: bool,
-    download_segments: usize,
+    request_limiter: Option<Arc<DownloadRequestLimiter>>,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let format = CompressionFormat::from_url(url)?;
@@ -1700,21 +2040,37 @@ fn blocking_download_and_extract(
         if result.is_ok() &&
             let Some(sp) = shared
         {
-            sp.archive_done();
+            sp.complete_archive(file_path.metadata()?.len());
         }
         result
-    } else if resumable || download_segments > 1 {
+    } else if let Some(request_limiter) = request_limiter.as_ref() {
         download_and_extract(
             url,
             format,
             target_dir,
             shared.as_ref(),
-            download_segments,
+            request_limiter,
+            cancel_token,
+        )
+    } else if resumable {
+        let request_limiter = DownloadRequestLimiter::new(1);
+        download_and_extract(
+            url,
+            format,
+            target_dir,
+            shared.as_ref(),
+            &request_limiter,
             cancel_token,
         )
     } else {
-        let result =
-            streaming_download_and_extract(url, format, target_dir, shared.as_ref(), cancel_token);
+        let result = streaming_download_and_extract(
+            url,
+            format,
+            target_dir,
+            shared.as_ref(),
+            None,
+            cancel_token,
+        );
         if result.is_ok() &&
             let Some(sp) = shared
         {
@@ -1734,7 +2090,7 @@ async fn stream_and_extract(
     target_dir: &Path,
     shared: Option<Arc<SharedProgress>>,
     resumable: bool,
-    download_segments: usize,
+    request_limiter: Option<Arc<DownloadRequestLimiter>>,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let target_dir = target_dir.to_path_buf();
@@ -1745,7 +2101,7 @@ async fn stream_and_extract(
             &target_dir,
             shared,
             resumable,
-            download_segments,
+            request_limiter,
             cancel_token,
         )
     })
@@ -1760,7 +2116,7 @@ async fn process_modular_archive(
     cache_dir: Option<&Path>,
     shared: Option<Arc<SharedProgress>>,
     resumable: bool,
-    download_segments: usize,
+    request_limiter: Option<Arc<DownloadRequestLimiter>>,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let target_dir = target_dir.to_path_buf();
@@ -1773,7 +2129,7 @@ async fn process_modular_archive(
             cache_dir.as_deref(),
             shared,
             resumable,
-            download_segments,
+            request_limiter,
             cancel_token,
         )
     })
@@ -1787,15 +2143,14 @@ fn blocking_process_modular_archive(
     target_dir: &Path,
     cache_dir: Option<&Path>,
     shared: Option<Arc<SharedProgress>>,
-    resumable: bool,
-    download_segments: usize,
+    _resumable: bool,
+    request_limiter: Option<Arc<DownloadRequestLimiter>>,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let archive = &planned.archive;
     if verify_output_files(target_dir, &archive.output_files)? {
         if let Some(sp) = &shared {
-            sp.add(archive.size);
-            sp.archive_done();
+            sp.complete_archive(archive.size);
         }
         info!(target: "reth::cli", file = %archive.file_name, component = %planned.component, "Skipping already verified plain files");
         return Ok(());
@@ -1806,35 +2161,79 @@ fn blocking_process_modular_archive(
     for attempt in 1..=MAX_DOWNLOAD_RETRIES {
         cleanup_output_files(target_dir, &archive.output_files);
 
-        if resumable || download_segments > 1 {
-            let cache_dir = cache_dir.ok_or_else(|| eyre::eyre!("Missing cache directory"))?;
+        if attempt > 1 {
+            info!(target: "reth::cli",
+                file = %archive.file_name,
+                component = %planned.component,
+                attempt,
+                max = MAX_DOWNLOAD_RETRIES,
+                "Retrying archive from scratch"
+            );
+        }
+
+        if let Some(cache_dir) = cache_dir {
             let archive_path = cache_dir.join(&archive.file_name);
             let part_path = cache_dir.join(format!("{}.part", archive.file_name));
-            let result = (if download_segments > 1 {
-                parallel_segmented_download(
-                    &archive.url,
-                    cache_dir,
-                    download_segments,
-                    shared.as_ref(),
-                    cancel_token.clone(),
-                )
-            } else {
-                resumable_download(&archive.url, cache_dir, shared.as_ref(), cancel_token.clone())
-            })
-            .and_then(|(downloaded_path, _)| {
+            if let Some(sp) = shared.as_ref() {
+                sp.start_download();
+            }
+            let request_limiter = request_limiter
+                .as_ref()
+                .ok_or_else(|| eyre::eyre!("Missing download request limiter"))?;
+            let download_result = parallel_segmented_download(
+                &archive.url,
+                cache_dir,
+                shared.as_ref(),
+                request_limiter,
+                cancel_token.clone(),
+            );
+            if let Some(sp) = shared.as_ref() {
+                sp.finish_download();
+            }
+
+            let (downloaded_path, downloaded_size) = match download_result {
+                Ok(downloaded) => downloaded,
+                Err(e) => {
+                    let _ = fs::remove_file(&archive_path);
+                    let _ = fs::remove_file(&part_path);
+                    warn!(target: "reth::cli",
+                        file = %archive.file_name,
+                        component = %planned.component,
+                        attempt,
+                        err = %format_args!("{e:#}"),
+                        "Archive download failed, retrying"
+                    );
+                    last_error = Some(e);
+                    if attempt < MAX_DOWNLOAD_RETRIES {
+                        std::thread::sleep(Duration::from_secs(RETRY_BACKOFF_SECS));
+                    }
+                    continue;
+                }
+            };
+
+            info!(target: "reth::cli",
+                file = %archive.file_name,
+                component = %planned.component,
+                attempt,
+                size = %DownloadProgress::format_size(downloaded_size),
+                "Archive download complete"
+            );
+
+            let extract_result = (|| {
+                let _extraction_guard = ExtractionGuard::new(shared.as_ref());
                 let file = fs::open(&downloaded_path)?;
                 extract_archive_raw(file, format, target_dir)
-            });
+            })();
             let _ = fs::remove_file(&archive_path);
             let _ = fs::remove_file(&part_path);
 
-            if let Err(e) = result {
+            if let Err(e) = extract_result {
                 warn!(target: "reth::cli",
                     file = %archive.file_name,
                     component = %planned.component,
                     attempt,
-                    err = %e,
-                    "Download or extraction failed, retrying"
+                    err = %format_args!("{e:#}"),
+                    "Archive extraction failed, retrying from scratch"
                 );
                 last_error = Some(e);
                 if attempt < MAX_DOWNLOAD_RETRIES {
@@ -1844,23 +2243,31 @@ fn blocking_process_modular_archive(
             }
         } else {
             // streaming_download_and_extract already has its own internal retry loop
-            streaming_download_and_extract(
+            if let Some(sp) = shared.as_ref() {
+                sp.start_download();
+            }
+            let download_result = streaming_download_and_extract(
                 &archive.url,
                 format,
                 target_dir,
                 shared.as_ref(),
+                request_limiter.as_ref(),
                 cancel_token.clone(),
-            )?;
+            );
+            if let Some(sp) = shared.as_ref() {
+                sp.finish_download();
+            }
+            download_result?;
         }
 
         if verify_output_files(target_dir, &archive.output_files)? {
             if let Some(sp) = &shared {
-                sp.archive_done();
+                sp.complete_archive(archive.size);
             }
             return Ok(());
         }
 
-        warn!(target: "reth::cli", file = %archive.file_name, component = %planned.component, attempt, "Extracted files failed integrity checks, retrying");
+        warn!(target: "reth::cli", file = %archive.file_name, component = %planned.component, attempt, "Archive extracted, but output verification failed, retrying");
     }
 
     if let Some(e) = last_error {
@@ -2419,5 +2826,54 @@ mod tests {
         assert_eq!(planned[0].ty, SnapshotComponentType::State);
         assert_eq!(planned[1].ty, SnapshotComponentType::RocksdbIndices);
         assert_eq!(planned[2].ty, SnapshotComponentType::Transactions);
+    }
+
+    #[test]
+    fn shared_progress_keeps_retry_bytes_out_of_completion_progress() {
+        let progress = SharedProgress::new(10, 1, CancellationToken::new());
+
+        progress.add_fetched(10);
+        progress.add_fetched(10);
+        progress.complete_archive(10);
+
+        assert_eq!(progress.fetched_bytes.load(Ordering::Relaxed), 20);
+        assert_eq!(progress.completed_bytes.load(Ordering::Relaxed), 10);
+        assert_eq!(progress.archives_done.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn segmented_plan_skips_small_files() {
+        assert!(plan_segmented_download(SEGMENTED_DOWNLOAD_MIN_FILE_SIZE - 1, 16).is_none());
+    }
+
+    #[test]
+    fn segmented_plan_uses_large_pieces_and_adaptive_workers() {
+        let total_size = 512 * 1024 * 1024;
+        let plan = plan_segmented_download(total_size, 32).unwrap();
+
+        assert_eq!(plan.piece_size, SEGMENTED_DOWNLOAD_SMALL_PIECE_SIZE);
+        assert_eq!(plan.piece_count, 16);
+        assert_eq!(plan.worker_count, 16);
+    }
+
+    #[test]
+    fn build_download_pieces_covers_entire_file() {
+        let pieces = build_download_pieces(10, 4).into_iter().collect::<Vec<_>>();
+
+        assert_eq!(
+            pieces,
+            vec![
+                DownloadPiece { start: 0, end: 3 },
+                DownloadPiece { start: 4, end: 7 },
+                DownloadPiece { start: 8, end: 9 },
+            ]
+        );
+    }
+
+    #[test]
+    fn piece_status_retry_policy_retries_200_ok() {
+        assert!(should_retry_piece_status(StatusCode::OK));
+        assert!(should_retry_piece_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!should_retry_piece_status(StatusCode::NOT_FOUND));
     }
 }

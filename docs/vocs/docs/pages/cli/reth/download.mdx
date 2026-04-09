@@ -181,16 +181,11 @@ Storage:
           Archives are downloaded to a .part file with HTTP Range resume support before extraction. Slower but tolerates network interruptions without restarting. By default, archives stream directly into the extractor.
 
       --download-concurrency <DOWNLOAD_CONCURRENCY>
-          Maximum number of concurrent modular archive workers
+          Maximum number of simultaneous HTTP downloads.
+
+          Applies across the entire snapshot download. Small files use one slot, while large files may use multiple slots by splitting into fixed-size pieces.
 
           [default: 8]
-
-      --download-segments <DOWNLOAD_SEGMENTS>
-          Number of parallel segments per file download.
-
-          Uses HTTP Range requests to download each file in parallel segments, matching aria2c-style parallelism. Set to 1 to disable segmented downloads. Ignored when the server does not support Range requests.
-
-          [default: 16]
 
       --list
           List available snapshots and exit.
