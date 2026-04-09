@@ -340,15 +340,16 @@ where
                 "Skipping BAL prewarm - no cache available"
             );
             self.send_bal_storage_hashed_state(&bal);
-            self.send_bal_account_hashed_state(&bal);
+            self.spawn_bal_account_hashed_state(bal);
             let _ =
                 actions_tx.send(PrewarmTaskEvent::FinishedTxExecution { executed_transactions: 0 });
             return;
         }
 
         if bal.is_empty() {
-            self.send_bal_storage_hashed_state(&bal);
-            self.send_bal_account_hashed_state(&bal);
+            if let Some(to_multi_proof) = self.to_multi_proof.as_ref() {
+                let _ = to_multi_proof.send(StateRootMessage::FinishedStateUpdates);
+            }
             let _ =
                 actions_tx.send(PrewarmTaskEvent::FinishedTxExecution { executed_transactions: 0 });
             return;
@@ -397,11 +398,12 @@ where
         // Convert the BAL to HashedPostState and hand it to the multiproof task after the BAL
         // prewarm work has been spawned so proof work does not wait on cache warming.
         //
-        // Storage hashing is pure compute (no DB) and runs first on rayon to get proof
-        // targets flowing into the sparse trie ASAP.
-        // Account reads go through CachedStateProvider to warm the execution cache.
+        // Storage hashing is pure compute (no DB) and runs synchronously on rayon to get
+        // proof targets flowing into the sparse trie ASAP.
+        // Account reads are spawned on a blocking task so they run concurrently with the
+        // sparse trie processing the storage updates.
         self.send_bal_storage_hashed_state(&bal);
-        self.send_bal_account_hashed_state(&bal);
+        self.spawn_bal_account_hashed_state(bal);
     }
 
     /// Hashes BAL storage slots in parallel and streams per-account [`HashedPostState`] updates
@@ -445,106 +447,121 @@ where
         });
     }
 
-    /// Reads accounts from the BAL through a [`CachedStateProvider`] in parallel, hashes them,
-    /// and streams per-account [`HashedPostState`] updates to the multiproof task.
+    /// Spawns a background task that reads accounts from the BAL through a
+    /// [`CachedStateProvider`] in parallel, hashes them, and streams per-account
+    /// [`HashedPostState`] updates to the multiproof task.
     ///
     /// Sends [`StateRootMessage::FinishedStateUpdates`] after all accounts are processed.
-    fn send_bal_account_hashed_state(&self, bal: &BlockAccessList) {
-        let _span = debug_span!(
-            target: "engine::tree::payload_processor::prewarm",
-            "send_bal_account_hashed_state",
-            bal_accounts = bal.len(),
-        )
-        .entered();
-
-        let Some(to_multi_proof) = self.to_multi_proof.as_ref() else { return };
+    fn spawn_bal_account_hashed_state(&self, bal: Arc<BlockAccessList>) {
+        let Some(to_multi_proof) = self.to_multi_proof.clone() else { return };
 
         let saved_cache = self.ctx.saved_cache.clone();
-        let provider_builder = &self.ctx.provider;
+        let provider_builder = self.ctx.provider.clone();
+        let executor = self.executor.clone();
+        let span = Span::current();
 
-        self.executor.prewarming_pool().install_fn(|| {
-            bal.par_iter()
-                .for_each_init(
-                    || -> Option<Box<dyn AccountReader>> {
-                        let inner = match provider_builder.build() {
-                            Ok(p) => p,
-                            Err(err) => {
-                                warn!(
-                                    target: "engine::tree::payload_processor::prewarm",
-                                    ?err,
-                                    "Failed to build provider for BAL account reads"
-                                );
-                                return None;
-                            }
-                        };
-                        if let Some(saved) = &saved_cache {
-                            let caches = saved.cache().clone();
-                            let cache_metrics = saved.metrics().clone();
-                            Some(Box::new(CachedStateProvider::new(inner, caches, cache_metrics)))
-                        } else {
-                            Some(Box::new(inner) as Box<dyn AccountReader>)
-                        }
-                    },
-                    |provider, account_changes| {
-                        let Some(provider) = provider.as_ref() else { return };
+        self.executor.spawn_blocking_named("bal-account-hashed-state", move || {
+            let _span = debug_span!(
+                target: "engine::tree::payload_processor::prewarm",
+                parent: span,
+                "send_bal_account_hashed_state",
+                bal_accounts = bal.len(),
+            )
+            .entered();
 
-                        let address = account_changes.address;
-                        let existing_account = provider.basic_account(&address).ok().flatten();
-
-                        let balance = account_changes
-                            .balance_changes
-                            .last()
-                            .map(|change| change.post_balance);
-                        let nonce = account_changes
-                            .nonce_changes
-                            .last()
-                            .map(|change| change.new_nonce);
-                        let code_hash = account_changes.code_changes.last().map(|code_change| {
-                            if code_change.new_code.is_empty() {
-                                alloy_consensus::constants::KECCAK_EMPTY
+            executor.prewarming_pool().install_fn(|| {
+                bal.par_iter()
+                    .for_each_init(
+                        || -> Option<Box<dyn AccountReader>> {
+                            let inner = match provider_builder.build() {
+                                Ok(p) => p,
+                                Err(err) => {
+                                    warn!(
+                                        target: "engine::tree::payload_processor::prewarm",
+                                        ?err,
+                                        "Failed to build provider for BAL account reads"
+                                    );
+                                    return None;
+                                }
+                            };
+                            if let Some(saved) = &saved_cache {
+                                let caches = saved.cache().clone();
+                                let cache_metrics = saved.metrics().clone();
+                                Some(Box::new(CachedStateProvider::new(
+                                    inner,
+                                    caches,
+                                    cache_metrics,
+                                )))
                             } else {
-                                keccak256(&code_change.new_code)
+                                Some(Box::new(inner) as Box<dyn AccountReader>)
                             }
-                        });
+                        },
+                        |provider, account_changes| {
+                            let Some(provider) = provider.as_ref() else { return };
 
-                        // Skip read-only accounts
-                        if balance.is_none()
-                            && nonce.is_none()
-                            && code_hash.is_none()
-                            && account_changes.storage_changes.is_empty()
-                        {
-                            return;
-                        }
+                            let address = account_changes.address;
+                            let existing_account =
+                                provider.basic_account(&address).ok().flatten();
 
-                        let account = reth_primitives_traits::Account {
-                            balance: balance.unwrap_or_else(|| {
-                                existing_account
-                                    .as_ref()
-                                    .map(|acc| acc.balance)
-                                    .unwrap_or(alloy_primitives::U256::ZERO)
-                            }),
-                            nonce: nonce.unwrap_or_else(|| {
-                                existing_account.as_ref().map(|acc| acc.nonce).unwrap_or(0)
-                            }),
-                            bytecode_hash: code_hash.or_else(|| {
-                                existing_account
-                                    .as_ref()
-                                    .and_then(|acc| acc.bytecode_hash)
-                                    .or(Some(alloy_consensus::constants::KECCAK_EMPTY))
-                            }),
-                        };
+                            let balance = account_changes
+                                .balance_changes
+                                .last()
+                                .map(|change| change.post_balance);
+                            let nonce = account_changes
+                                .nonce_changes
+                                .last()
+                                .map(|change| change.new_nonce);
+                            let code_hash =
+                                account_changes.code_changes.last().map(|code_change| {
+                                    if code_change.new_code.is_empty() {
+                                        alloy_consensus::constants::KECCAK_EMPTY
+                                    } else {
+                                        keccak256(&code_change.new_code)
+                                    }
+                                });
 
-                        let hashed_address = keccak256(address);
-                        let mut hashed_state = reth_trie::HashedPostState::default();
-                        hashed_state.accounts.insert(hashed_address, Some(account));
+                            // Skip read-only accounts
+                            if balance.is_none()
+                                && nonce.is_none()
+                                && code_hash.is_none()
+                                && account_changes.storage_changes.is_empty()
+                            {
+                                return;
+                            }
 
-                        let _ = to_multi_proof
-                            .send(StateRootMessage::HashedStateUpdate(hashed_state));
-                    },
-                );
+                            let account = reth_primitives_traits::Account {
+                                balance: balance.unwrap_or_else(|| {
+                                    existing_account
+                                        .as_ref()
+                                        .map(|acc| acc.balance)
+                                        .unwrap_or(alloy_primitives::U256::ZERO)
+                                }),
+                                nonce: nonce.unwrap_or_else(|| {
+                                    existing_account
+                                        .as_ref()
+                                        .map(|acc| acc.nonce)
+                                        .unwrap_or(0)
+                                }),
+                                bytecode_hash: code_hash.or_else(|| {
+                                    existing_account
+                                        .as_ref()
+                                        .and_then(|acc| acc.bytecode_hash)
+                                        .or(Some(alloy_consensus::constants::KECCAK_EMPTY))
+                                }),
+                            };
+
+                            let hashed_address = keccak256(address);
+                            let mut hashed_state = reth_trie::HashedPostState::default();
+                            hashed_state.accounts.insert(hashed_address, Some(account));
+
+                            let _ = to_multi_proof
+                                .send(StateRootMessage::HashedStateUpdate(hashed_state));
+                        },
+                    );
+            });
+
+            let _ = to_multi_proof.send(StateRootMessage::FinishedStateUpdates);
         });
-
-        let _ = to_multi_proof.send(StateRootMessage::FinishedStateUpdates);
     }
 
     /// Executes the task.
