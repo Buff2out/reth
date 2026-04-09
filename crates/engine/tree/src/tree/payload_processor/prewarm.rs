@@ -12,7 +12,7 @@
 //! 3. When actual block execution happens, it benefits from the warmed cache
 
 use crate::tree::{
-    payload_processor::{bal, multiproof::StateRootMessage},
+    payload_processor::{bal, bal::AccountReaderFactory, multiproof::StateRootMessage},
     precompile_cache::{CachedPrecompile, PrecompileCacheMap},
     CachedStateProvider, ExecutionEnv, PayloadExecutionCache, SavedCache, StateProviderBuilder,
 };
@@ -39,6 +39,16 @@ use std::sync::{
     Arc,
 };
 use tracing::{debug, debug_span, instrument, trace, trace_span, warn, Span};
+
+impl<N, P> AccountReaderFactory for &StateProviderBuilder<N, P>
+where
+    N: NodePrimitives,
+    P: BlockReader + StateProviderFactory + StateReader + Clone,
+{
+    fn build_reader(&self) -> Result<Box<dyn AccountReader>, reth_provider::ProviderError> {
+        self.build().map(|p| Box::new(p) as Box<dyn AccountReader>)
+    }
+}
 
 /// Determines the prewarming mode: transaction-based, BAL-based, or skipped.
 #[derive(Debug)]
@@ -395,6 +405,8 @@ where
 
     /// Converts the BAL to [`HashedPostState`](reth_trie::HashedPostState) and sends it to the
     /// multiproof task.
+    ///
+    /// Uses the prewarming pool to parallelize DB reads across accounts.
     fn send_bal_hashed_state(&self, bal: &BlockAccessList) {
         let _span = debug_span!(
             target: "engine::tree::payload_processor::prewarm",
@@ -405,41 +417,28 @@ where
 
         let Some(to_multi_proof) = self.to_multi_proof.as_ref() else { return };
 
-        let provider = {
-            let _span = debug_span!(
-                target: "engine::tree::payload_processor::prewarm",
-                "send_bal_hashed_state::build_provider",
-            )
-            .entered();
-            match self.ctx.provider.build() {
-                Ok(provider) => provider,
-                Err(err) => {
-                    warn!(
-                        target: "engine::tree::payload_processor::prewarm",
-                        ?err,
-                        "Failed to build provider for BAL hashed state conversion"
-                    );
-                    return;
-                }
-            }
-        };
-
         let hashed_state = {
             let _span = debug_span!(
                 target: "engine::tree::payload_processor::prewarm",
-                "send_bal_hashed_state::bal_to_hashed_post_state",
+                "send_bal_hashed_state::par_bal_to_hashed_post_state",
             )
             .entered();
-            match bal::bal_to_hashed_post_state(bal, &provider) {
-                Ok(state) => state,
-                Err(err) => {
-                    warn!(
-                        target: "engine::tree::payload_processor::prewarm",
-                        ?err,
-                        "Failed to convert BAL to hashed state"
-                    );
-                    return;
-                }
+
+            let provider_builder = &self.ctx.provider;
+            self.executor.prewarming_pool().install_fn(|| {
+                bal::par_bal_to_hashed_post_state(bal, provider_builder)
+            })
+        };
+
+        let hashed_state = match hashed_state {
+            Ok(state) => state,
+            Err(err) => {
+                warn!(
+                    target: "engine::tree::payload_processor::prewarm",
+                    ?err,
+                    "Failed to convert BAL to hashed state"
+                );
+                return;
             }
         };
 
@@ -450,15 +449,8 @@ where
             "Converted BAL to hashed post state"
         );
 
-        {
-            let _span = debug_span!(
-                target: "engine::tree::payload_processor::prewarm",
-                "send_bal_hashed_state::send",
-            )
-            .entered();
-            let _ = to_multi_proof.send(StateRootMessage::HashedStateUpdate(hashed_state));
-            let _ = to_multi_proof.send(StateRootMessage::FinishedStateUpdates);
-        }
+        let _ = to_multi_proof.send(StateRootMessage::HashedStateUpdate(hashed_state));
+        let _ = to_multi_proof.send(StateRootMessage::FinishedStateUpdates);
     }
 
     /// Executes the task.
