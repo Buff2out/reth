@@ -115,6 +115,7 @@ impl<'a> Iterator for BALSlotIter<'a> {
 
 /// Converts a Block Access List into a [`HashedPostState`] by extracting the final state
 /// of modified accounts and storage slots.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn bal_to_hashed_post_state<P>(
     bal: &BlockAccessList,
     provider: P,
