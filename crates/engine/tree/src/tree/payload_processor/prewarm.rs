@@ -352,82 +352,65 @@ where
             "Starting BAL prewarm"
         );
 
-        let ctx = self.ctx.clone();
-        let to_multi_proof = self.to_multi_proof.clone();
-        let executor = self.executor.clone();
-        let span = Span::current();
+        let ctx = &self.ctx;
+        let to_multi_proof = self.to_multi_proof.as_ref();
+        let executor = &self.executor;
 
-        self.executor.spawn_blocking_named("prewarm-bal", move || {
-            let _enter = debug_span!(
-                target: "engine::tree::payload_processor::prewarm",
-                parent: &span,
-                "prewarm_bal"
-            )
-            .entered();
+        rayon::join(
+            // Left: prefetch storage slots into execution cache (prewarming pool)
+            || {
+                let _span = debug_span!(
+                    target: "engine::tree::payload_processor::prewarm",
+                    "bal_prefetch_storage",
+                    bal_accounts = bal.len(),
+                )
+                .entered();
 
-            rayon::join(
-                // Left: prefetch storage slots into execution cache (prewarming pool)
-                || {
-                    let _span = debug_span!(
-                        target: "engine::tree::payload_processor::prewarm",
-                        "bal_prefetch_storage",
-                        bal_accounts = bal.len(),
-                    )
-                    .entered();
+                if ctx.saved_cache.is_none() {
+                    return;
+                }
+                executor.prewarming_pool().install_fn(|| {
+                    bal.par_iter().for_each_init(
+                        || {
+                            (
+                                ctx.clone(),
+                                None::<CachedStateProvider<reth_provider::StateProviderBox, true>>,
+                            )
+                        },
+                        |(ctx, provider), account| {
+                            if ctx.should_stop() {
+                                return;
+                            }
+                            ctx.prefetch_bal_storage(provider, account);
+                        },
+                    );
+                });
+            },
+            // Right: stream hashed state updates to the multiproof task (BAL prewarming pool)
+            || {
+                let _span = debug_span!(
+                    target: "engine::tree::payload_processor::prewarm",
+                    "bal_hashed_state_stream",
+                    bal_accounts = bal.len(),
+                )
+                .entered();
 
-                    if ctx.saved_cache.is_none() {
-                        return;
-                    }
-                    executor.prewarming_pool().install_fn(|| {
-                        bal.par_iter().for_each_init(
-                            || {
-                                (
-                                    ctx.clone(),
-                                    None::<
-                                        CachedStateProvider<reth_provider::StateProviderBox, true>,
-                                    >,
-                                )
-                            },
-                            |(ctx, provider), account| {
-                                if ctx.should_stop() {
-                                    return;
-                                }
-                                ctx.prefetch_bal_storage(provider, account);
-                            },
-                        );
-                    });
-                },
-                // Right: stream hashed state updates to the multiproof task (BAL prewarming pool)
-                || {
-                    let _span = debug_span!(
-                        target: "engine::tree::payload_processor::prewarm",
-                        "bal_hashed_state_stream",
-                        bal_accounts = bal.len(),
-                    )
-                    .entered();
+                let Some(to_multi_proof) = to_multi_proof else { return };
 
-                    let Some(to_multi_proof) = to_multi_proof.as_ref() else { return };
+                executor.bal_prewarming_pool().install_fn(|| {
+                    bal.par_iter().for_each_init(
+                        || (ctx.clone(), None::<Box<dyn AccountReader>>),
+                        |(ctx, provider), account_changes| {
+                            ctx.send_bal_hashed_state(provider, account_changes, to_multi_proof);
+                        },
+                    );
+                });
 
-                    executor.bal_prewarming_pool().install_fn(|| {
-                        bal.par_iter().for_each_init(
-                            || (ctx.clone(), None::<Box<dyn AccountReader>>),
-                            |(ctx, provider), account_changes| {
-                                ctx.send_bal_hashed_state(
-                                    provider,
-                                    account_changes,
-                                    to_multi_proof,
-                                );
-                            },
-                        );
-                    });
+                let _ = to_multi_proof.send(StateRootMessage::FinishedStateUpdates);
+            },
+        );
 
-                    let _ = to_multi_proof.send(StateRootMessage::FinishedStateUpdates);
-                },
-            );
-
-            let _ =
-                actions_tx.send(PrewarmTaskEvent::FinishedTxExecution { executed_transactions: 0 });
-        });
+        let _ = actions_tx.send(PrewarmTaskEvent::FinishedTxExecution { executed_transactions: 0 });
     }
 
     /// Executes the task.
