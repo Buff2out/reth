@@ -37,7 +37,7 @@ impl core::fmt::Debug for RethEvmFactory {
 
 impl RethEvmFactory {
     /// Creates a new factory that owns the backend.
-    pub fn new(backend: JitBackend) -> Self {
+    pub const fn new(backend: JitBackend) -> Self {
         Self { inner: JitEvmFactory::new(backend) }
     }
 

@@ -449,6 +449,17 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
 
         let stage_id = self.stage(stage_index).id();
         let mut made_progress = false;
+
+        // Re-fetch the previous stage's checkpoint to get the latest progress.
+        // This is critical when max_blocks_per_run is set, as previous stages may have
+        // advanced their checkpoint even if they didn't reach the full target.
+        let previous_stage = if stage_index > 0 {
+            let prev_stage_id = self.stage(stage_index - 1).id();
+            self.provider_factory.get_stage_checkpoint(prev_stage_id)?.map(|c| c.block_number)
+        } else {
+            previous_stage
+        };
+
         // Use min(max_block, previous_stage) so that a stage never targets beyond what
         // the previous stage has processed. This is needed when max_blocks_per_run causes
         // the Execution stage to report completion early.
