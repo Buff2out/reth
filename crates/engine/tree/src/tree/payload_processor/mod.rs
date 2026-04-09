@@ -221,16 +221,6 @@ where
     ///
     /// ## Sparse trie task
     ///
-    /// Responsible for preparing sparse trie messages for the sparse trie task.
-    /// A state update (e.g. tx output) is converted into a multiproof calculation that returns an
-    /// output back to this task.
-    ///
-    /// Receives updates from sequential execution.
-    /// This task runs until it receives a shutdown signal, which should be after the block
-    /// was fully executed.
-    ///
-    /// ## Sparse trie task
-    ///
     /// Responsible for calculating the state root.
     ///
     /// This task runs until there are no further updates to process.
