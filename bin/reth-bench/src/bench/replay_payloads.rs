@@ -3,7 +3,7 @@
 use crate::{
     authenticated_transport::AuthenticatedTransportConnect,
     bench::{
-        generate_big_block::BigBlockPayload,
+        generate_big_block::{compute_payload_block_hash, BigBlockPayload},
         helpers::parse_duration,
         metrics_scraper::MetricsScraper,
         output::{
@@ -235,7 +235,7 @@ impl Command {
 
         for (i, payload) in payloads.iter().enumerate() {
             let execution_data = &payload.execution_data;
-            let block_hash = payload.block_hash;
+            let mut block_hash = payload.block_hash;
             let v1 = execution_data.payload.as_v1();
 
             let gas_used = v1.gas_used;
@@ -276,7 +276,8 @@ impl Command {
 
                 // Inject sidecar BAL into the inline V4 payload field when --bal is set.
                 // If the payload is not already V4 we upgrade it (V3→V4) so the BAL
-                // can be carried inline.
+                // can be carried inline. This changes the block hash, so we recompute
+                // it and patch parent_hash to maintain the chain.
                 let mut execution_data = execution_data.clone();
                 if self.bal {
                     if let Some(bal) = &payload.block_access_list {
@@ -291,6 +292,15 @@ impl Command {
                             execution_data.payload.as_v4_mut().unwrap().block_access_list =
                                 encoded_bal;
                         }
+
+                        // Patch parent_hash so this block chains off the (possibly
+                        // rehashed) previous block.
+                        execution_data.payload.as_v1_mut().parent_hash = parent_hash;
+
+                        // Recompute block hash after payload modification and update
+                        // the hash stored in the payload itself.
+                        block_hash = compute_payload_block_hash(&execution_data)?;
+                        execution_data.payload.as_v1_mut().block_hash = block_hash;
                     }
                 }
 
