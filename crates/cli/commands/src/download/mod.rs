@@ -1,3 +1,71 @@
+//! Snapshot download command.
+//!
+//! `reth download` prepares a data directory from published snapshot archives. [`DownloadCommand`]
+//! covers both a single-archive path and a manifest-driven path, and owns the steps required to
+//! turn downloaded bytes into a bootable node directory.
+//!
+//! ## Entry modes
+//!
+//! [`DownloadCommand`] has two main execution modes:
+//!
+//! - Single-archive mode downloads one `.tar.lz4` or `.tar.zst` archive from `--url` and extracts
+//!   it directly.
+//! - Manifest mode resolves a [`SnapshotManifest`], turns CLI or TUI choices into
+//!   [`ComponentSelection`]s, plans the required archives, processes them, and then writes the
+//!   resulting config and database checkpoints.
+//!
+//! [`DownloadDefaults`] defines the discovery endpoints and default help text used when the command
+//! needs to discover a manifest instead of consuming an explicit source.
+//!
+//! ## Selection and planning
+//!
+//! Manifest mode first reduces user input into `ResolvedComponents`: a map of
+//! [`SnapshotComponentType`] to [`ComponentSelection`] plus an optional `SelectionPreset`. This is
+//! the boundary between user intent (`minimal`, `full`, `archive`, or explicit `--with-*` flags)
+//! and concrete snapshot work.
+//!
+//! The selected components are then expanded into `PlannedDownloads`, which is the concrete set of
+//! `PlannedArchive`s that must be verified, downloaded, or reused. Planning also computes the
+//! aggregate byte budget used by progress reporting.
+//!
+//! ## Archive processing
+//!
+//! Each planned archive is processed independently, but the job shares a single
+//! `DownloadRequestLimiter` and `SharedProgress` across all archives. Archive processing is modeled
+//! as an explicit retry state machine (`ArchiveAttemptMode` and `ArchiveAttemptState`):
+//!
+//! - reuse verified plain output files when possible,
+//! - otherwise fetch and extract the archive,
+//! - verify the declared output files,
+//! - retry the entire archive attempt if extraction succeeded but verification failed.
+//!
+//! The important invariant is that reuse and completion are driven by verified output files, not by
+//! the presence of a previously downloaded archive.
+//!
+//! ## Fetch and extraction
+//!
+//! Fetch strategy is chosen per archive. A `RemoteArchiveProbe` determines whether the source
+//! supports HTTP range requests. `FetchStrategy` then chooses between a sequential download and a
+//! segmented download plan (`SegmentedDownloadPlan`). `SequentialDownloadFallback` records why a
+//! source could not use the segmented path.
+//!
+//! Segmented download retries individual byte ranges. Archive processing retries whole-archive
+//! attempts. These are separate layers: range retries deal with transient request failures, while
+//! archive retries deal with extraction or output verification failures.
+//!
+//! `CompressionFormat` determines how the archive stream is unpacked once bytes are available.
+//!
+//! ## Progress and finalization
+//!
+//! `DownloadProgress` reports progress for the single-archive path. `SharedProgress` reports
+//! aggregate progress for modular downloads. It tracks fetched bytes separately from completed
+//! bytes so repeated fetches during retries do not overstate completion.
+//!
+//! After all required archives are complete, [`DownloadCommand`] finalizes the directory by
+//! writing the derived node configuration and updating prune or index-stage checkpoints. A
+//! successful command therefore leaves the data directory not just populated, but consistent with
+//! the snapshot shape that was selected.
+
 mod archive;
 pub mod config_gen;
 mod extract;
