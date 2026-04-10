@@ -453,6 +453,8 @@ pub fn jit_runtime_config(jit: &JitArgs) -> RuntimeConfig {
         dump_dir: None,
         debug_assertions: jit.debug,
         blocking: jit.blocking,
+        no_dedup: false,
+        no_dse: false,
         on_compilation: None,
     }
 }
