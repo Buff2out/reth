@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use alloy_genesis::ChainConfig;
 use alloy_rpc_types_admin::{
     EthInfo, EthPeerInfo, EthProtocolInfo, NodeInfo, PeerInfo, PeerNetworkInfo, PeerProtocolInfo,
     Ports, ProtocolInfo,
@@ -103,19 +102,13 @@ where
     async fn node_info(&self) -> RpcResult<NodeInfo> {
         let enode = self.network.local_node_record();
         let status = self.network.network_status().await.to_rpc_result()?;
-        let mut config = ChainConfig {
-            chain_id: self.chain_spec.chain().id(),
-            terminal_total_difficulty_passed: self
-                .chain_spec
-                .final_paris_total_difficulty()
-                .is_some(),
-            terminal_total_difficulty: self
-                .chain_spec
-                .ethereum_fork_activation(EthereumHardfork::Paris)
-                .ttd(),
-            deposit_contract_address: self.chain_spec.deposit_contract().map(|dc| dc.address),
-            ..self.chain_spec.genesis().config.clone()
-        };
+        let mut config = self.chain_spec.genesis().config.clone();
+        config.chain_id = self.chain_spec.chain().id();
+        config.terminal_total_difficulty_passed =
+            self.chain_spec.final_paris_total_difficulty().is_some();
+        config.terminal_total_difficulty =
+            self.chain_spec.ethereum_fork_activation(EthereumHardfork::Paris).ttd();
+        config.deposit_contract_address = self.chain_spec.deposit_contract().map(|dc| dc.address);
 
         // helper macro to set the block or time for a hardfork if known
         macro_rules! set_block_or_time {

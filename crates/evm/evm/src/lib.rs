@@ -57,6 +57,61 @@ pub use alloy_evm::{
     *,
 };
 
+use revm::context_interface::{transaction::AccessList, TransactionType};
+
+/// Abstraction over mutable transaction environment.
+///
+/// Provides setters for common transaction fields, complementing
+/// the read-only accessors on [`revm::context::Transaction`].
+pub trait TransactionEnvMut:
+    revm::context::Transaction + Debug + Clone + Send + Sync + 'static
+{
+    /// Sets the gas limit.
+    fn set_gas_limit(&mut self, gas_limit: u64);
+
+    /// Sets the gas limit, returning `self`.
+    fn with_gas_limit(mut self, gas_limit: u64) -> Self {
+        self.set_gas_limit(gas_limit);
+        self
+    }
+
+    /// Sets the nonce.
+    fn set_nonce(&mut self, nonce: u64);
+
+    /// Sets the nonce, returning `self`.
+    fn with_nonce(mut self, nonce: u64) -> Self {
+        self.set_nonce(nonce);
+        self
+    }
+
+    /// Sets the access list.
+    fn set_access_list(&mut self, access_list: AccessList);
+
+    /// Sets the access list, returning `self`.
+    fn with_access_list(mut self, access_list: AccessList) -> Self {
+        self.set_access_list(access_list);
+        self
+    }
+}
+
+impl TransactionEnvMut for revm::context::TxEnv {
+    fn set_gas_limit(&mut self, gas_limit: u64) {
+        self.gas_limit = gas_limit;
+    }
+
+    fn set_nonce(&mut self, nonce: u64) {
+        self.nonce = nonce;
+    }
+
+    fn set_access_list(&mut self, access_list: AccessList) {
+        self.access_list = access_list;
+
+        if self.tx_type == TransactionType::Legacy as u8 {
+            self.tx_type = TransactionType::Eip2930 as u8;
+        }
+    }
+}
+
 /// A complete configuration of EVM for Reth.
 ///
 /// This trait encapsulates complete configuration required for transaction execution and block
