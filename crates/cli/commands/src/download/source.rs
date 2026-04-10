@@ -24,6 +24,7 @@ pub(crate) struct SnapshotApiEntry {
 }
 
 impl SnapshotApiEntry {
+    /// Returns whether this discovery entry points to a modular manifest.
     fn is_modular(&self) -> bool {
         self.metadata_url.ends_with("manifest.json")
     }
@@ -133,6 +134,7 @@ pub(crate) fn print_snapshot_listing(entries: &[SnapshotApiEntry], chain_id: u64
     );
 }
 
+/// Loads a manifest from an HTTP(S) URL, `file://` URL, or local path.
 pub(crate) async fn fetch_manifest_from_source(source: &str) -> Result<SnapshotManifest> {
     if let Ok(parsed) = Url::parse(source) {
         return match parsed.scheme() {
@@ -174,6 +176,7 @@ pub(crate) async fn fetch_manifest_from_source(source: &str) -> Result<SnapshotM
     Ok(serde_json::from_str(&content)?)
 }
 
+/// Resolves the base URL used to join relative archive paths in a manifest.
 pub(crate) fn resolve_manifest_base_url(
     manifest: &SnapshotManifest,
     source: &str,

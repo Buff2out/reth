@@ -1,27 +1,36 @@
-use super::{archive::verify_output_files, manifest::*};
+use super::{manifest::*, verify::OutputVerifier};
 use eyre::Result;
 use std::{collections::BTreeMap, path::Path};
 use tracing::info;
 
+/// One archive selected from the manifest, along with its component name.
 #[derive(Debug, Clone)]
 pub(crate) struct PlannedArchive {
+    /// Snapshot component type this archive belongs to.
     pub(crate) ty: SnapshotComponentType,
+    /// User-facing component name used in logs.
     pub(crate) component: String,
-    pub(crate) archive: ArchiveDescriptor,
+    /// Concrete snapshot archive metadata resolved from the manifest.
+    pub(crate) archive: SnapshotArchive,
 }
 
+/// The archive list for a modular snapshot download.
 #[derive(Debug)]
 pub(crate) struct PlannedDownloads {
+    /// Concrete archives that still need reuse checks or processing.
     pub(crate) archives: Vec<PlannedArchive>,
+    /// Total size of all planned archives.
     pub(crate) total_size: u64,
 }
 
 impl PlannedDownloads {
+    /// Returns the number of concrete archives queued for this snapshot selection.
     pub(crate) const fn total_archives(&self) -> usize {
         self.archives.len()
     }
 }
 
+/// Returns the sort priority used to schedule archives.
 pub(crate) const fn archive_priority_rank(ty: SnapshotComponentType) -> u8 {
     match ty {
         SnapshotComponentType::State => 0,
@@ -30,20 +39,25 @@ pub(crate) const fn archive_priority_rank(ty: SnapshotComponentType) -> u8 {
     }
 }
 
+/// Startup summary showing how much of the selected work can be reused.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct DownloadStartupSummary {
+    /// Archives whose declared outputs already verify on disk.
     pub(crate) reusable: usize,
+    /// Archives that still need to be downloaded or retried.
     pub(crate) needs_download: usize,
 }
 
+/// Checks selected archives against existing output files before work begins.
 pub(crate) fn summarize_download_startup(
     all_downloads: &[PlannedArchive],
     target_dir: &Path,
 ) -> Result<DownloadStartupSummary> {
     let mut summary = DownloadStartupSummary::default();
+    let verifier = OutputVerifier::new(target_dir);
 
     for planned in all_downloads {
-        if verify_output_files(target_dir, &planned.archive.output_files)? {
+        if verifier.verify(&planned.archive.output_files)? {
             summary.reusable += 1;
         } else {
             summary.needs_download += 1;
@@ -53,6 +67,7 @@ pub(crate) fn summarize_download_startup(
     Ok(summary)
 }
 
+/// Converts a selection into the manifest distance form used for archive lookup.
 fn selection_archive_distance(selection: &ComponentSelection) -> Option<Option<u64>> {
     match selection {
         ComponentSelection::All => Some(None),
@@ -61,6 +76,7 @@ fn selection_archive_distance(selection: &ComponentSelection) -> Option<Option<u
     }
 }
 
+/// Sorts planned archives into a stable processing order.
 fn sort_planned_archives(all_downloads: &mut [PlannedArchive]) {
     all_downloads.sort_by(|a, b| {
         archive_priority_rank(a.ty)
@@ -70,6 +86,7 @@ fn sort_planned_archives(all_downloads: &mut [PlannedArchive]) {
     });
 }
 
+/// Expands component selections into the archives that need to be processed.
 pub(crate) fn collect_planned_archives(
     manifest: &SnapshotManifest,
     selections: &BTreeMap<SnapshotComponentType, ComponentSelection>,
@@ -81,30 +98,26 @@ pub(crate) fn collect_planned_archives(
         let Some(distance) = selection_archive_distance(selection) else { continue };
         total_size += manifest.size_for_distance(*ty, distance);
 
-        let descriptors = manifest.archive_descriptors_for_distance(*ty, distance);
+        let snapshot_archives = manifest.snapshot_archives_for_distance(*ty, distance);
         let component = ty.display_name().to_string();
-        if !descriptors.is_empty() {
+        if !snapshot_archives.is_empty() {
             info!(target: "reth::cli",
                 component = %component,
-                archives = descriptors.len(),
+                archives = snapshot_archives.len(),
                 selection = %selection,
                 "Queued component for download"
             );
         }
 
-        for descriptor in descriptors {
-            if descriptor.output_files.is_empty() {
+        for archive in snapshot_archives {
+            if archive.output_files.is_empty() {
                 eyre::bail!(
                     "Invalid modular manifest: {} is missing plain output checksum metadata",
-                    descriptor.file_name
+                    archive.file_name
                 );
             }
 
-            archives.push(PlannedArchive {
-                ty: *ty,
-                component: component.clone(),
-                archive: descriptor,
-            });
+            archives.push(PlannedArchive { ty: *ty, component: component.clone(), archive });
         }
     }
 
@@ -114,7 +127,7 @@ pub(crate) fn collect_planned_archives(
 
 #[cfg(test)]
 mod tests {
-    use super::{super::archive::file_blake3_hex, *};
+    use super::*;
     use tempfile::tempdir;
 
     #[test]
@@ -123,13 +136,13 @@ mod tests {
         let target_dir = dir.path();
         let ok_file = target_dir.join("ok.bin");
         std::fs::write(&ok_file, vec![1_u8; 4]).unwrap();
-        let ok_hash = file_blake3_hex(&ok_file).unwrap();
+        let ok_hash = blake3::hash(&[1_u8; 4]).to_hex().to_string();
 
         let planned = vec![
             PlannedArchive {
                 ty: SnapshotComponentType::State,
                 component: "State".to_string(),
-                archive: ArchiveDescriptor {
+                archive: SnapshotArchive {
                     url: "https://example.com/ok.tar.zst".to_string(),
                     file_name: "ok.tar.zst".to_string(),
                     size: 10,
@@ -144,7 +157,7 @@ mod tests {
             PlannedArchive {
                 ty: SnapshotComponentType::Headers,
                 component: "Headers".to_string(),
-                archive: ArchiveDescriptor {
+                archive: SnapshotArchive {
                     url: "https://example.com/missing.tar.zst".to_string(),
                     file_name: "missing.tar.zst".to_string(),
                     size: 10,
@@ -159,7 +172,7 @@ mod tests {
             PlannedArchive {
                 ty: SnapshotComponentType::Transactions,
                 component: "Transactions".to_string(),
-                archive: ArchiveDescriptor {
+                archive: SnapshotArchive {
                     url: "https://example.com/bad-size.tar.zst".to_string(),
                     file_name: "bad-size.tar.zst".to_string(),
                     size: 10,
@@ -180,7 +193,7 @@ mod tests {
             PlannedArchive {
                 ty: SnapshotComponentType::Transactions,
                 component: "Transactions".to_string(),
-                archive: ArchiveDescriptor {
+                archive: SnapshotArchive {
                     url: "u3".to_string(),
                     file_name: "t.tar.zst".to_string(),
                     size: 1,
@@ -195,7 +208,7 @@ mod tests {
             PlannedArchive {
                 ty: SnapshotComponentType::RocksdbIndices,
                 component: "RocksDB Indices".to_string(),
-                archive: ArchiveDescriptor {
+                archive: SnapshotArchive {
                     url: "u2".to_string(),
                     file_name: "rocksdb_indices.tar.zst".to_string(),
                     size: 1,
@@ -210,7 +223,7 @@ mod tests {
             PlannedArchive {
                 ty: SnapshotComponentType::State,
                 component: "State (mdbx)".to_string(),
-                archive: ArchiveDescriptor {
+                archive: SnapshotArchive {
                     url: "u1".to_string(),
                     file_name: "state.tar.zst".to_string(),
                     size: 1,

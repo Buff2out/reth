@@ -8,8 +8,10 @@
 //!
 //! [`DownloadCommand`] has two main execution modes:
 //!
-//! - Single-archive mode downloads one `.tar.lz4` or `.tar.zst` archive from `--url` and extracts
-//!   it directly.
+//! - Single-archive mode processes one `.tar.lz4` or `.tar.zst` archive from `--url`.
+//!   Depending on the source and flags, it either extracts a local `file://` archive, streams a
+//!   remote archive straight into extraction, or downloads the archive to disk first and then
+//!   extracts it.
 //! - Manifest mode resolves a [`SnapshotManifest`], turns CLI or TUI choices into
 //!   [`ComponentSelection`]s, plans the required archives, processes them, and then writes the
 //!   resulting config and database checkpoints.
@@ -20,40 +22,50 @@
 //! ## Selection and planning
 //!
 //! Manifest mode first reduces user input into `ResolvedComponents`: a map of
-//! [`SnapshotComponentType`] to [`ComponentSelection`] plus an optional `SelectionPreset`. This is
-//! the boundary between user intent (`minimal`, `full`, `archive`, or explicit `--with-*` flags)
-//! and concrete snapshot work.
+//! [`SnapshotComponentType`] to [`ComponentSelection`] plus an optional `SelectionPreset`.
+//! This turns CLI input (`minimal`, `full`, `archive`, or explicit `--with-*` flags) into the
+//! component selections used by the download code.
 //!
-//! The selected components are then expanded into `PlannedDownloads`, which is the concrete set of
+//! The selected components are then expanded into `PlannedDownloads`, which is the set of
 //! `PlannedArchive`s that must be verified, downloaded, or reused. Planning also computes the
-//! aggregate byte budget used by progress reporting.
+//! total byte count used by progress reporting.
 //!
 //! ## Archive processing
 //!
-//! Each planned archive is processed independently, but the job shares a single
-//! `DownloadRequestLimiter` and `SharedProgress` across all archives. Archive processing is modeled
-//! as an explicit retry state machine (`ArchiveAttemptMode` and `ArchiveAttemptState`):
+//! Each planned archive is processed independently, but `DownloadSession` holds the shared
+//! progress, request limit, and cancellation token for the whole command.
+//! `ArchiveProcessContext` adds the paths needed to process one archive.
+//!
+//! Archive processing is modeled around `ModularDownloadJob`, which schedules work, and
+//! `ArchiveProcessor`, which owns the explicit retry state machine for one archive.
+//! `ArchiveMode` decides whether that archive should be fetched through the cache or streamed
+//! directly:
 //!
 //! - reuse verified plain output files when possible,
 //! - otherwise fetch and extract the archive,
 //! - verify the declared output files,
 //! - retry the entire archive attempt if extraction succeeded but verification failed.
 //!
-//! The important invariant is that reuse and completion are driven by verified output files, not by
-//! the presence of a previously downloaded archive.
+//! Reuse and completion are based on verified output files, not on whether an old archive file is
+//! present.
 //!
 //! ## Fetch and extraction
 //!
-//! Fetch strategy is chosen per archive. A `RemoteArchiveProbe` determines whether the source
-//! supports HTTP range requests. `FetchStrategy` then chooses between a sequential download and a
-//! segmented download plan (`SegmentedDownloadPlan`). `SequentialDownloadFallback` records why a
-//! source could not use the segmented path.
+//! [`stream_and_extract`] handles the single-archive path. It supports local files, resumable
+//! downloads to disk, and direct streaming extraction.
+//!
+//! When the code needs to fetch an archive to disk, it uses `ArchiveFetcher`. The fetcher probes
+//! the remote source and chooses between a sequential download and a segmented download plan
+//! (`SegmentedDownloadPlan`). `SequentialDownloadFallback` records why a source could not use the
+//! segmented path, while `SegmentedDownload` runs the worker queue and piece retries for the
+//! parallel path.
 //!
 //! Segmented download retries individual byte ranges. Archive processing retries whole-archive
 //! attempts. These are separate layers: range retries deal with transient request failures, while
 //! archive retries deal with extraction or output verification failures.
 //!
-//! `CompressionFormat` determines how the archive stream is unpacked once bytes are available.
+//! `CompressionFormat` determines how the archive stream is unpacked once bytes are available, and
+//! `OutputVerifier` checks the extracted output files before reuse or completion.
 //!
 //! ## Progress and finalization
 //!
@@ -63,8 +75,7 @@
 //!
 //! After all required archives are complete, [`DownloadCommand`] finalizes the directory by
 //! writing the derived node configuration and updating prune or index-stage checkpoints. A
-//! successful command therefore leaves the data directory not just populated, but consistent with
-//! the snapshot shape that was selected.
+//! successful command leaves a data directory that matches the snapshot shape that was selected.
 
 mod archive;
 pub mod config_gen;
@@ -74,8 +85,10 @@ pub mod manifest;
 pub mod manifest_cmd;
 mod planning;
 mod progress;
+mod session;
 mod source;
 mod tui;
+mod verify;
 
 use crate::common::EnvironmentArgs;
 use archive::run_modular_downloads;
@@ -113,10 +126,14 @@ const RETH_SNAPSHOTS_API_URL: &str = "https://snapshots.reth.rs/api/snapshots";
 /// Maximum number of simultaneous HTTP downloads across the entire snapshot job.
 const MAX_CONCURRENT_DOWNLOADS: usize = 8;
 
+/// Built-in component presets for snapshot selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SelectionPreset {
+    /// Minimal node data needed to start from a snapshot.
     Minimal,
+    /// Full-node data matching the default full prune settings.
     Full,
+    /// All available snapshot data.
     Archive,
 }
 
@@ -250,6 +267,7 @@ impl DownloadDefaults {
 }
 
 impl Default for DownloadDefaults {
+    /// Returns the built-in download defaults.
     fn default() -> Self {
         Self::default_download_defaults()
     }
@@ -346,6 +364,7 @@ pub struct DownloadCommand<C: ChainSpecParser> {
 }
 
 impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCommand<C> {
+    /// Runs the download command in single-archive or manifest mode.
     pub async fn execute<N>(self) -> Result<()> {
         let chain = self.env.chain.chain();
         let chain_id = chain.id();
@@ -422,6 +441,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         Ok(())
     }
 
+    /// Loads the manifest and resolves its effective base URL.
     async fn load_manifest(&self, chain_id: u64) -> Result<SnapshotManifest> {
         let manifest_source = self.resolve_manifest_source(chain_id).await?;
 
@@ -440,6 +460,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         Ok(manifest)
     }
 
+    /// Writes config and checkpoint state after all modular archives complete.
     fn finalize_modular_download(
         &self,
         selections: &BTreeMap<SnapshotComponentType, ComponentSelection>,
@@ -566,6 +587,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         Ok(ResolvedComponents { selections: selected, preset })
     }
 
+    /// Builds the default minimal component selection for the manifest.
     fn minimal_preset_selections(
         &self,
         manifest: &SnapshotManifest,
@@ -578,6 +600,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
             .collect()
     }
 
+    /// Builds the default full-node component selection for the manifest.
     fn full_preset_selections(
         &self,
         manifest: &SnapshotManifest,
@@ -607,6 +630,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         selections
     }
 
+    /// Returns the full preset selection for one component type.
     fn full_selection_for_component(
         &self,
         ty: SnapshotComponentType,
@@ -655,6 +679,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         }
     }
 
+    /// Resolves the manifest source from CLI input or snapshot discovery.
     async fn resolve_manifest_source(&self, chain_id: u64) -> Result<String> {
         if let Some(path) = &self.manifest_path {
             return Ok(path.display().to_string());
@@ -667,6 +692,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
     }
 }
 
+/// Converts a prune mode into the matching component selection.
 fn selection_from_prune_mode(mode: Option<PruneMode>, snapshot_block: u64) -> ComponentSelection {
     match mode {
         None => ComponentSelection::All,
@@ -714,6 +740,7 @@ fn inject_archive_only_components(
     }
 }
 
+/// Returns `true` when RocksDB-backed index stages should be reset after download.
 fn should_reset_index_stage_checkpoints(
     selections: &BTreeMap<SnapshotComponentType, ComponentSelection>,
 ) -> bool {

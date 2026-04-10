@@ -101,9 +101,9 @@ pub struct OutputFileChecksum {
     pub blake3: String,
 }
 
-/// A single archive with concrete URL and optional integrity metadata.
+/// A concrete snapshot archive with its download and verification metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArchiveDescriptor {
+pub struct SnapshotArchive {
     pub url: String,
     pub file_name: String,
     pub size: u64,
@@ -311,19 +311,19 @@ impl SnapshotManifest {
         }
     }
 
-    /// Returns concrete archive descriptors for a component, optionally limited to distance.
-    pub fn archive_descriptors_for_distance(
+    /// Returns concrete snapshot archives for a component, optionally limited to distance.
+    pub fn snapshot_archives_for_distance(
         &self,
         ty: SnapshotComponentType,
         distance: Option<u64>,
-    ) -> Vec<ArchiveDescriptor> {
+    ) -> Vec<SnapshotArchive> {
         let Some(component) = self.component(ty) else {
             return vec![];
         };
 
         match component {
             ComponentManifest::Single(single) => {
-                vec![ArchiveDescriptor {
+                vec![SnapshotArchive {
                     url: format!("{}/{}", self.base_url_or_empty(), single.file),
                     file_name: single.file.clone(),
                     size: single.size,
@@ -353,7 +353,7 @@ impl SnapshotManifest {
                         let output_files =
                             chunked.chunk_output_files.get(i as usize).cloned().unwrap_or_default();
 
-                        ArchiveDescriptor {
+                        SnapshotArchive {
                             url: format!("{}/{}", self.base_url_or_empty(), file_name),
                             file_name,
                             size,
@@ -1039,13 +1039,13 @@ mod tests {
             components,
         };
 
-        let state = m.archive_descriptors_for_distance(SnapshotComponentType::State, None);
+        let state = m.snapshot_archives_for_distance(SnapshotComponentType::State, None);
         assert_eq!(state.len(), 1);
         assert_eq!(state[0].file_name, "state.tar.zst");
         assert_eq!(state[0].blake3.as_deref(), Some("abc123"));
         assert_eq!(state[0].output_files.len(), 1);
 
-        let tx = m.archive_descriptors_for_distance(SnapshotComponentType::Transactions, None);
+        let tx = m.snapshot_archives_for_distance(SnapshotComponentType::Transactions, None);
         assert_eq!(tx.len(), 2);
         assert_eq!(tx[0].blake3, None);
         assert_eq!(tx[1].blake3, None);

@@ -1,9 +1,10 @@
 use super::{
-    fetch::{parallel_segmented_download, DownloadedArchive},
+    fetch::{ArchiveFetcher, DownloadedArchive},
     progress::{
         DownloadProgress, DownloadRequestLimiter, ProgressReader, SharedProgress,
         SharedProgressReader,
     },
+    session::DownloadSession,
     MAX_DOWNLOAD_RETRIES, RETRY_BACKOFF_SECS,
 };
 use eyre::{Result, WrapErr};
@@ -29,7 +30,9 @@ const EXTENSION_TAR_ZSTD: &str = ".tar.zst";
 /// Supported compression formats for snapshots
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CompressionFormat {
+    /// LZ4-compressed tar archive.
     Lz4,
+    /// Zstandard-compressed tar archive.
     Zstd,
 }
 
@@ -124,11 +127,10 @@ pub(crate) fn streaming_download_and_extract(
     url: &str,
     format: CompressionFormat,
     target_dir: &Path,
-    shared: Option<&Arc<SharedProgress>>,
-    request_limiter: Option<&Arc<DownloadRequestLimiter>>,
-    cancel_token: CancellationToken,
+    session: &DownloadSession,
 ) -> Result<()> {
-    let quiet = shared.is_some();
+    let shared = session.progress();
+    let quiet = session.progress().is_some();
     let mut last_error: Option<eyre::Error> = None;
 
     for attempt in 1..=MAX_DOWNLOAD_RETRIES {
@@ -142,8 +144,10 @@ pub(crate) fn streaming_download_and_extract(
         }
 
         let client = BlockingClient::builder().connect_timeout(Duration::from_secs(30)).build()?;
-        let _request_permit =
-            request_limiter.map(|limiter| limiter.acquire(shared, &cancel_token)).transpose()?;
+        let _request_permit = session
+            .request_limiter()
+            .map(|limiter| limiter.acquire(session.progress(), session.cancel_token()))
+            .transpose()?;
 
         let response = match client.get(url).send().and_then(|r| r.error_for_status()) {
             Ok(r) => r,
@@ -179,7 +183,13 @@ pub(crate) fn streaming_download_and_extract(
             extract_archive_raw(reader, format, target_dir)
         } else {
             let total_size = response.content_length().unwrap_or(0);
-            extract_archive(response, total_size, format, target_dir, cancel_token.clone())
+            extract_archive(
+                response,
+                total_size,
+                format,
+                target_dir,
+                session.cancel_token().clone(),
+            )
         };
 
         match result {
@@ -212,19 +222,11 @@ fn download_and_extract(
     url: &str,
     format: CompressionFormat,
     target_dir: &Path,
-    shared: Option<&Arc<SharedProgress>>,
-    request_limiter: &Arc<DownloadRequestLimiter>,
-    cancel_token: CancellationToken,
+    session: DownloadSession,
 ) -> Result<()> {
-    let quiet = shared.is_some();
-    let DownloadedArchive { path: downloaded_path, size: total_size } =
-        parallel_segmented_download(
-            url,
-            target_dir,
-            shared,
-            request_limiter,
-            cancel_token.clone(),
-        )?;
+    let quiet = session.progress().is_some();
+    let fetcher = ArchiveFetcher::new(url.to_string(), target_dir, session.clone());
+    let DownloadedArchive { path: downloaded_path, size: total_size } = fetcher.download()?;
 
     let file_name =
         downloaded_path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
@@ -241,18 +243,15 @@ fn download_and_extract(
     if quiet {
         extract_archive_raw(file, format, target_dir)?;
     } else {
-        extract_archive(file, total_size, format, target_dir, cancel_token)?;
+        extract_archive(file, total_size, format, target_dir, session.cancel_token().clone())?;
         info!(target: "reth::cli",
             file = %file_name,
             "Extraction complete"
         );
     }
 
-    fs::remove_file(&downloaded_path)?;
-
-    if let Some(progress) = shared {
-        progress.record_archive_complete(total_size);
-    }
+    fetcher.cleanup_downloaded_files();
+    session.record_archive_complete(total_size);
 
     Ok(())
 }
@@ -275,48 +274,31 @@ fn blocking_download_and_extract(
     if let Ok(parsed_url) = Url::parse(url) &&
         parsed_url.scheme() == "file"
     {
+        let session = DownloadSession::new(shared, request_limiter, cancel_token);
         let file_path = parsed_url
             .to_file_path()
             .map_err(|_| eyre::eyre!("Invalid file:// URL path: {}", url))?;
         let result = extract_from_file(&file_path, format, target_dir);
-        if result.is_ok() &&
-            let Some(progress) = shared
-        {
-            progress.record_archive_complete(file_path.metadata()?.len());
+        if result.is_ok() {
+            session.record_archive_complete(file_path.metadata()?.len());
         }
         result
-    } else if let Some(request_limiter) = request_limiter.as_ref() {
+    } else if let Some(request_limiter) = request_limiter {
         download_and_extract(
             url,
             format,
             target_dir,
-            shared.as_ref(),
-            request_limiter,
-            cancel_token,
+            DownloadSession::new(shared, Some(request_limiter), cancel_token),
         )
     } else if resumable {
-        let request_limiter = DownloadRequestLimiter::new(1);
-        download_and_extract(
-            url,
-            format,
-            target_dir,
-            shared.as_ref(),
-            &request_limiter,
-            cancel_token,
-        )
+        let session =
+            DownloadSession::new(shared, Some(DownloadRequestLimiter::new(1)), cancel_token);
+        download_and_extract(url, format, target_dir, session)
     } else {
-        let result = streaming_download_and_extract(
-            url,
-            format,
-            target_dir,
-            shared.as_ref(),
-            None,
-            cancel_token,
-        );
-        if result.is_ok() &&
-            let Some(progress) = shared
-        {
-            progress.record_archive_finished();
+        let session = DownloadSession::new(shared, None, cancel_token);
+        let result = streaming_download_and_extract(url, format, target_dir, &session);
+        if result.is_ok() {
+            session.record_archive_finished();
         }
         result
     }

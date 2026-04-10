@@ -14,9 +14,13 @@ const BYTE_UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
 
 /// Tracks download progress and throttles display updates to every 100ms.
 pub(crate) struct DownloadProgress {
+    /// Bytes copied so far for this single download.
     pub(crate) downloaded: u64,
+    /// Total bytes expected for this single download.
     total_size: u64,
+    /// Time when the progress line was last printed.
     last_displayed: Instant,
+    /// Time when this progress tracker started.
     started_at: Instant,
 }
 
@@ -86,28 +90,38 @@ impl DownloadProgress {
     }
 }
 
-/// Shared progress counter for parallel downloads.
+/// Shared progress counters for parallel downloads.
 ///
-/// Each download thread atomically increments `fetched_bytes`. Archives that are
-/// successfully verified increment `completed_bytes`. A single display task on
-/// the main thread reads both counters periodically and prints one aggregated
-/// progress line. It also tracks when the job has switched from downloading to
-/// extraction so the logs can reflect the active phase.
+/// Download threads increment `fetched_bytes`. Verified archives increment
+/// `completed_bytes`. A background task reads both counters and prints one
+/// progress line for the whole job.
 pub(crate) struct SharedProgress {
+    /// Bytes fetched so far across all archive attempts.
     pub(crate) fetched_bytes: AtomicU64,
+    /// Bytes whose archives have fully verified.
     pub(crate) completed_bytes: AtomicU64,
+    /// Total bytes expected across all planned archives.
     pub(crate) total_size: u64,
+    /// Total number of planned archives.
     pub(crate) total_archives: u64,
+    /// Time when the modular download job started.
     pub(crate) started_at: Instant,
+    /// Number of archives that have fully finished.
     pub(crate) archives_done: AtomicU64,
+    /// Number of archives currently in the fetch phase.
     pub(crate) active_downloads: AtomicU64,
+    /// Number of in-flight HTTP requests.
     pub(crate) active_download_requests: AtomicU64,
+    /// Number of archives currently extracting.
     pub(crate) active_extractions: AtomicU64,
+    /// Signals the background progress task to exit.
     pub(crate) done: AtomicBool,
+    /// Cancellation token shared by the whole command.
     cancel_token: CancellationToken,
 }
 
 impl SharedProgress {
+    /// Creates the shared progress state for a modular download job.
     pub(crate) fn new(
         total_size: u64,
         total_archives: u64,
@@ -128,73 +142,89 @@ impl SharedProgress {
         })
     }
 
+    /// Returns whether the whole command has been cancelled.
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancel_token.is_cancelled()
     }
 
+    /// Adds fetched bytes without marking any archive complete.
     pub(crate) fn record_fetched_bytes(&self, bytes: u64) {
         self.fetched_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    /// Adds bytes whose archive outputs have fully verified.
     pub(crate) fn record_completed_bytes(&self, bytes: u64) {
         self.completed_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    /// Increments the count of finished archives.
     pub(crate) fn record_archive_finished(&self) {
         self.archives_done.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Marks one archive as actively downloading.
     pub(crate) fn download_started(&self) {
         self.active_downloads.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Marks one archive download as finished.
     pub(crate) fn download_finished(&self) {
         let _ = self
             .active_downloads
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
     }
 
+    /// Marks one HTTP request as in flight.
     pub(crate) fn request_started(&self) {
         self.active_download_requests.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Marks one HTTP request as finished.
     pub(crate) fn request_finished(&self) {
         let _ =
             self.active_download_requests
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
     }
 
+    /// Marks one archive as actively extracting.
     pub(crate) fn extraction_started(&self) {
         self.active_extractions.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Marks one archive extraction as finished.
     pub(crate) fn extraction_finished(&self) {
         let _ = self
             .active_extractions
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
     }
 
+    /// Records a fully verified archive and its completed byte count.
     pub(crate) fn record_archive_complete(&self, bytes: u64) {
         self.record_completed_bytes(bytes);
         self.record_archive_finished();
     }
 }
 
-/// Global request cap for the blocking downloader.
+/// Global request limit for the blocking downloader.
 ///
-/// This is effectively a blocking semaphore implemented with `Mutex + Condvar`
-/// because the segmented path uses blocking reqwest clients on OS threads.
+/// This uses `Mutex + Condvar` because the segmented path runs blocking reqwest
+/// clients on OS threads.
 pub(crate) struct DownloadRequestLimiter {
+    /// Maximum number of in-flight HTTP requests.
     limit: usize,
+    /// Current number of acquired request slots.
     active: Mutex<usize>,
+    /// Wakes blocked threads when a slot is released.
     notify: Condvar,
 }
 
 impl DownloadRequestLimiter {
+    /// Creates the shared request limiter.
     pub(crate) fn new(limit: usize) -> Arc<Self> {
         Arc::new(Self { limit: limit.max(1), active: Mutex::new(0), notify: Condvar::new() })
     }
 
+    /// Returns the configured request limit.
     pub(crate) fn max_concurrency(&self) -> usize {
         self.limit
     }
@@ -219,7 +249,7 @@ impl DownloadRequestLimiter {
             }
 
             // Wake periodically so cancellation can interrupt waiters even if
-            // no request finishes and signals the condvar.
+            // no request finishes.
             let (next_active, _) =
                 self.notify.wait_timeout(active, Duration::from_millis(100)).unwrap();
             active = next_active;
@@ -229,14 +259,17 @@ impl DownloadRequestLimiter {
 
 /// RAII permit for one in-flight HTTP request.
 ///
-/// Dropping the permit releases a slot in the global request pool and updates
+/// Dropping the permit releases a slot in the shared request limit and updates
 /// the live progress counters.
 pub(crate) struct DownloadRequestPermit<'a> {
+    /// Limiter that owns the request slot.
     limiter: &'a DownloadRequestLimiter,
+    /// Shared progress counters updated when the permit drops.
     progress: Option<&'a Arc<SharedProgress>>,
 }
 
 impl Drop for DownloadRequestPermit<'_> {
+    /// Releases the request slot and updates shared progress counters.
     fn drop(&mut self) {
         let mut active = self.limiter.active.lock().unwrap();
         *active = active.saturating_sub(1);
@@ -251,10 +284,12 @@ impl Drop for DownloadRequestPermit<'_> {
 
 /// Marks one archive download as active for aggregate progress logging.
 pub(crate) struct DownloadActivityGuard<'a> {
+    /// Shared progress counters updated when the guard drops.
     progress: Option<&'a Arc<SharedProgress>>,
 }
 
 impl<'a> DownloadActivityGuard<'a> {
+    /// Marks one archive download as active until the guard drops.
     pub(crate) fn new(progress: Option<&'a Arc<SharedProgress>>) -> Self {
         if let Some(progress) = progress {
             progress.download_started();
@@ -264,6 +299,7 @@ impl<'a> DownloadActivityGuard<'a> {
 }
 
 impl Drop for DownloadActivityGuard<'_> {
+    /// Clears the active download count for this guard.
     fn drop(&mut self) {
         if let Some(progress) = self.progress {
             progress.download_finished();
@@ -273,10 +309,12 @@ impl Drop for DownloadActivityGuard<'_> {
 
 /// Marks one archive extraction as active for aggregate progress logging.
 pub(crate) struct ExtractionGuard<'a> {
+    /// Shared progress counters updated when the guard drops.
     progress: Option<&'a Arc<SharedProgress>>,
 }
 
 impl<'a> ExtractionGuard<'a> {
+    /// Marks one archive extraction as active until the guard drops.
     pub(crate) fn new(progress: Option<&'a Arc<SharedProgress>>) -> Self {
         if let Some(progress) = progress {
             progress.extraction_started();
@@ -286,6 +324,7 @@ impl<'a> ExtractionGuard<'a> {
 }
 
 impl Drop for ExtractionGuard<'_> {
+    /// Clears the active extraction count for this guard.
     fn drop(&mut self) {
         if let Some(progress) = self.progress {
             progress.extraction_finished();
@@ -295,18 +334,23 @@ impl Drop for ExtractionGuard<'_> {
 
 /// Adapter to track progress while reading (used for extraction in legacy path)
 pub(crate) struct ProgressReader<R> {
+    /// Wrapped reader that provides archive bytes.
     reader: R,
+    /// Per-download progress tracker for legacy paths.
     progress: DownloadProgress,
+    /// Cancellation token checked between reads.
     cancel_token: CancellationToken,
 }
 
 impl<R: Read> ProgressReader<R> {
+    /// Wraps a reader with per-download progress tracking.
     pub(crate) fn new(reader: R, total_size: u64, cancel_token: CancellationToken) -> Self {
         Self { reader, progress: DownloadProgress::new(total_size), cancel_token }
     }
 }
 
 impl<R: Read> Read for ProgressReader<R> {
+    /// Reads bytes, checks cancellation, and updates the local progress bar.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.cancel_token.is_cancelled() {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "download cancelled"));
@@ -324,11 +368,14 @@ impl<R: Read> Read for ProgressReader<R> {
 /// Wrapper that bumps a shared atomic counter while writing data.
 /// Used for parallel downloads where a single display task shows aggregated progress.
 pub(crate) struct SharedProgressWriter<W> {
+    /// Wrapped writer receiving downloaded bytes.
     pub(crate) inner: W,
+    /// Shared counters updated as bytes are written.
     pub(crate) progress: Arc<SharedProgress>,
 }
 
 impl<W: Write> Write for SharedProgressWriter<W> {
+    /// Writes bytes and records them in shared progress.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.progress.is_cancelled() {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "download cancelled"));
@@ -338,6 +385,7 @@ impl<W: Write> Write for SharedProgressWriter<W> {
         Ok(n)
     }
 
+    /// Flushes the wrapped writer.
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
     }
@@ -346,11 +394,14 @@ impl<W: Write> Write for SharedProgressWriter<W> {
 /// Wrapper that bumps a shared atomic counter while reading data.
 /// Used for streaming downloads where a single display task shows aggregated progress.
 pub(crate) struct SharedProgressReader<R> {
+    /// Wrapped reader producing streamed bytes.
     pub(crate) inner: R,
+    /// Shared counters updated as bytes are read.
     pub(crate) progress: Arc<SharedProgress>,
 }
 
 impl<R: Read> Read for SharedProgressReader<R> {
+    /// Reads bytes and records them in shared progress.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.progress.is_cancelled() {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "download cancelled"));
