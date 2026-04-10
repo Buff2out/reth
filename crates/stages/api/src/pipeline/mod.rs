@@ -575,8 +575,9 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
 
                     let block_number = checkpoint.block_number;
                     let prev_block_number = prev_checkpoint.unwrap_or_default().block_number;
-                    made_progress |= block_number != prev_block_number;
-                    if done {
+                    let stage_made_progress = block_number != prev_block_number;
+                    made_progress |= stage_made_progress;
+                    if done || !stage_made_progress {
                         return Ok(if made_progress {
                             ControlFlow::Continue { block_number }
                         } else {
