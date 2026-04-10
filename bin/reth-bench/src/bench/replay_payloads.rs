@@ -12,13 +12,14 @@ use crate::{
     },
     valid_payload::{call_forkchoice_updated_with_reth, call_new_payload_with_reth},
 };
+use alloy_eip7928::bal::Bal;
 use alloy_eips::eip7928::BlockAccessList;
 use alloy_primitives::B256;
 use alloy_provider::{network::AnyNetwork, Provider, RootProvider};
 use alloy_rpc_client::ClientBuilder;
 use alloy_rpc_types_engine::{
-    CancunPayloadFields, ExecutionData, ExecutionPayloadEnvelopeV4, ExecutionPayloadSidecar,
-    ForkchoiceState, JwtSecret, PraguePayloadFields,
+    CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadEnvelopeV4,
+    ExecutionPayloadSidecar, ExecutionPayloadV4, ForkchoiceState, JwtSecret, PraguePayloadFields,
 };
 use clap::Parser;
 use eyre::Context;
@@ -272,13 +273,33 @@ impl Command {
                     .wait_for_persistence
                     .unwrap_or(WaitForPersistence::Never)
                     .rpc_value(block_number);
+
+                // Inject sidecar BAL into the inline V4 payload field when --bal is set.
+                // If the payload is not already V4 we upgrade it (V3→V4) so the BAL
+                // can be carried inline.
+                let mut execution_data = execution_data.clone();
+                if self.bal {
+                    if let Some(bal) = &payload.block_access_list {
+                        let encoded_bal: alloy_primitives::Bytes =
+                            alloy_rlp::encode(&Bal::from(bal.clone())).into();
+
+                        // Upgrade to V4 if necessary, then set the BAL field.
+                        if execution_data.payload.as_v4().is_none() {
+                            execution_data.payload =
+                                upgrade_to_v4(execution_data.payload, encoded_bal);
+                        } else {
+                            execution_data.payload.as_v4_mut().unwrap().block_access_list =
+                                encoded_bal;
+                        }
+                    }
+                }
+
                 (
                     None,
                     serde_json::to_value((
-                        RethNewPayloadInput::ExecutionData(execution_data.clone()),
+                        RethNewPayloadInput::ExecutionData(execution_data),
                         wait_for_persistence,
                         self.no_wait_for_caches.then_some(false),
-                        self.bal.then(|| payload.block_access_list.clone()).flatten(),
                         big_block_data_param,
                     ))?,
                 )
@@ -493,4 +514,32 @@ impl Command {
 
         Ok(payloads)
     }
+}
+
+/// Upgrades an [`ExecutionPayload`] to V4 by wrapping the inner V3 payload (constructing
+/// default V2/V3 layers for V1 payloads if needed) and setting the provided BAL bytes.
+fn upgrade_to_v4(
+    payload: ExecutionPayload,
+    block_access_list: alloy_primitives::Bytes,
+) -> ExecutionPayload {
+    use alloy_rpc_types_engine::{ExecutionPayloadV2, ExecutionPayloadV3};
+
+    let v3 = match payload {
+        ExecutionPayload::V4(_) => unreachable!("caller checks as_v4().is_none()"),
+        ExecutionPayload::V3(v3) => v3,
+        ExecutionPayload::V2(v2) => {
+            ExecutionPayloadV3 { payload_inner: v2, blob_gas_used: 0, excess_blob_gas: 0 }
+        }
+        ExecutionPayload::V1(v1) => ExecutionPayloadV3 {
+            payload_inner: ExecutionPayloadV2 { payload_inner: v1, withdrawals: Vec::new() },
+            blob_gas_used: 0,
+            excess_blob_gas: 0,
+        },
+    };
+
+    ExecutionPayload::V4(ExecutionPayloadV4 {
+        payload_inner: v3,
+        block_access_list,
+        slot_number: 0,
+    })
 }
