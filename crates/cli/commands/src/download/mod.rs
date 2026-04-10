@@ -51,7 +51,7 @@
 //!
 //! ## Fetch and extraction
 //!
-//! [`stream_and_extract`] handles the single-archive path. It supports local files, resumable
+//! `stream_and_extract` handles the single-archive path. It supports local files, resumable
 //! downloads to disk, and direct streaming extraction.
 //!
 //! When the code needs to fetch an archive to disk, it uses `ArchiveFetcher`. The fetcher probes

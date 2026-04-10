@@ -496,6 +496,21 @@ struct SegmentedDownload {
     session: DownloadSession,
 }
 
+/// Shared inputs each segmented download worker needs while draining the piece queue.
+#[derive(Clone, Copy)]
+struct SegmentedWorkerContext<'a> {
+    /// Remote archive URL.
+    url: &'a str,
+    /// Partial file path where pieces are written.
+    part_path: &'a Path,
+    /// Shared progress counters for the whole command, when enabled.
+    shared: Option<&'a Arc<SharedProgress>>,
+    /// Shared cap for in-flight HTTP requests.
+    request_limiter: &'a DownloadRequestLimiter,
+    /// Cancellation token shared by the whole command.
+    cancel_token: &'a CancellationToken,
+}
+
 impl SegmentedDownload {
     /// Creates the segmented download state for one archive.
     fn new(
@@ -527,28 +542,24 @@ impl SegmentedDownload {
         let shared = session.progress();
         let cancel_token = session.cancel_token();
         let url = url.as_str();
+        let worker_context = SegmentedWorkerContext {
+            url,
+            part_path: paths.part_path(),
+            shared,
+            request_limiter: request_limiter.as_ref(),
+            cancel_token,
+        };
 
         std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(worker_count);
 
             for _ in 0..worker_count {
-                let part_path = paths.part_path();
                 let state = Arc::clone(&state);
                 let terminal_failure = Arc::clone(&terminal_failure);
                 let client = worker_client.clone();
-                let request_limiter = Arc::clone(&request_limiter);
 
                 handles.push(scope.spawn(move || {
-                    Self::worker_loop(
-                        &client,
-                        &url,
-                        part_path,
-                        state,
-                        terminal_failure,
-                        shared,
-                        request_limiter.as_ref(),
-                        cancel_token,
-                    );
+                    Self::worker_loop(&client, worker_context, state, terminal_failure);
                 }));
             }
 
@@ -576,15 +587,11 @@ impl SegmentedDownload {
     /// Runs one worker until there are no pieces left or another worker fails.
     fn worker_loop(
         client: &BlockingClient,
-        url: &str,
-        part_path: &Path,
+        context: SegmentedWorkerContext<'_>,
         state: Arc<SegmentedDownloadState>,
         terminal_failure: Arc<TerminalFailure>,
-        shared: Option<&Arc<SharedProgress>>,
-        request_limiter: &DownloadRequestLimiter,
-        cancel_token: &CancellationToken,
     ) {
-        let file = match OpenOptions::new().write(true).open(part_path) {
+        let file = match OpenOptions::new().write(true).open(context.part_path) {
             Ok(file) => file,
             Err(error) => {
                 state.note_terminal_failure();
@@ -593,15 +600,15 @@ impl SegmentedDownload {
             }
         };
 
-        while let Some(piece) = state.next_piece(cancel_token) {
+        while let Some(piece) = state.next_piece(context.cancel_token) {
             if let Err(error) = Self::download_piece_with_retries(
                 client,
-                url,
+                context.url,
                 &file,
                 piece,
-                shared,
-                request_limiter,
-                cancel_token,
+                context.shared,
+                context.request_limiter,
+                context.cancel_token,
             ) {
                 state.note_terminal_failure();
                 terminal_failure.record(error);
