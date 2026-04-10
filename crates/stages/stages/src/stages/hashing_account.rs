@@ -172,7 +172,7 @@ where
             let target = provider
                 .get_stage_checkpoint(StageId::Execution)?
                 .map(|cp| cp.block_number)
-                .unwrap_or(input.target());
+                .unwrap_or_else(|| input.target());
             return Ok(ExecOutput::done(input.checkpoint().with_block_number(target)));
         }
 

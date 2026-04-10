@@ -19,6 +19,7 @@ impl PipelineProgress {
     }
 
     /// Get next control flow step
+    #[cfg(test)]
     pub(crate) const fn next_ctrl(&self) -> ControlFlow {
         match self.block_number {
             Some(block_number) => ControlFlow::Continue { block_number },
