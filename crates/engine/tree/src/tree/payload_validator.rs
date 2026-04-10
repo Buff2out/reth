@@ -385,7 +385,6 @@ where
     pub fn validate_block_with_state<T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>>(
         &mut self,
         input: BlockOrPayload<T>,
-        block_access_list: Option<Arc<BlockAccessList>>,
         mut ctx: TreeCtx<'_, N>,
     ) -> InsertPayloadResult<N>
     where
@@ -511,13 +510,10 @@ where
         let txs = self.tx_iterator_for(&input)?;
 
         // Extract the BAL, if valid and available
-        let payload_block_access_list = ensure_ok!(input
+        let block_access_list = ensure_ok!(input
             .block_access_list()
             .transpose()
-            // Eventually gets converted to a `InsertBlockErrorKind::Other`
             .map_err(Box::<dyn std::error::Error + Send + Sync>::from));
-        let block_access_list =
-            block_access_list.or_else(|| payload_block_access_list.map(Arc::new));
 
         // Create lazy overlay from ancestors - this doesn't block, allowing execution to start
         // before the trie data is ready. The overlay will be computed on first access.
@@ -537,7 +533,7 @@ where
             provider_builder,
             overlay_factory.clone(),
             strategy,
-            block_access_list,
+            block_access_list.map(Arc::new),
         ));
 
         // Create optional cache stats for detailed block logging
@@ -1474,12 +1470,8 @@ where
             }
             StateRootStrategy::Parallel | StateRootStrategy::Synchronous => {
                 let start = Instant::now();
-                let handle = self.payload_processor.spawn_cache_exclusive(
-                    env,
-                    txs,
-                    provider_builder,
-                    block_access_list,
-                );
+                let handle =
+                    self.payload_processor.spawn_cache_exclusive(env, txs, provider_builder);
 
                 // Record prewarming initialization duration
                 self.metrics
@@ -1928,7 +1920,6 @@ pub trait EngineValidator<
         &mut self,
         payload: Types::ExecutionData,
         ctx: TreeCtx<'_, N>,
-        block_access_list: Option<Arc<BlockAccessList>>,
     ) -> ValidationOutcome<N>;
 
     /// Validates a block downloaded from the network.
@@ -1936,7 +1927,6 @@ pub trait EngineValidator<
         &mut self,
         block: SealedBlock<N::Block>,
         ctx: TreeCtx<'_, N>,
-        block_access_list: Option<Arc<BlockAccessList>>,
     ) -> ValidationOutcome<N>;
 
     /// Hook called after an executed block is inserted directly into the tree.
@@ -2000,18 +1990,16 @@ where
         &mut self,
         payload: Types::ExecutionData,
         ctx: TreeCtx<'_, N>,
-        block_access_list: Option<Arc<BlockAccessList>>,
     ) -> ValidationOutcome<N> {
-        self.validate_block_with_state(BlockOrPayload::Payload(payload), block_access_list, ctx)
+        self.validate_block_with_state(BlockOrPayload::Payload(payload), ctx)
     }
 
     fn validate_block(
         &mut self,
         block: SealedBlock<N::Block>,
         ctx: TreeCtx<'_, N>,
-        block_access_list: Option<Arc<BlockAccessList>>,
     ) -> ValidationOutcome<N> {
-        self.validate_block_with_state(BlockOrPayload::Block(block), block_access_list, ctx)
+        self.validate_block_with_state(BlockOrPayload::Block(block), ctx)
     }
 
     fn on_inserted_executed_block(&self, block: ExecutedBlock<N>) {

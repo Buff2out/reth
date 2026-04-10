@@ -1,5 +1,4 @@
 use crate::EngineApiError;
-use alloy_eip7928::BlockAccessList;
 use alloy_rlp::Decodable;
 use alloy_rpc_types_engine::{ForkchoiceState, ForkchoiceUpdated};
 use async_trait::async_trait;
@@ -8,7 +7,6 @@ use reth_engine_primitives::ConsensusEngineHandle;
 use reth_payload_primitives::PayloadTypes;
 use reth_primitives_traits::SealedBlock;
 use reth_rpc_api::{RethEngineApiServer, RethNewPayloadInput, RethPayloadStatus};
-use std::sync::Arc;
 use tracing::trace;
 
 /// Standalone implementation of the `reth_` engine API namespace.
@@ -35,7 +33,6 @@ impl<Payload: PayloadTypes> RethEngineApiServer<Payload::ExecutionData> for Reth
         input: RethNewPayloadInput<Payload::ExecutionData>,
         wait_for_persistence: Option<bool>,
         wait_for_caches: Option<bool>,
-        block_access_list: Option<BlockAccessList>,
     ) -> RpcResult<RethPayloadStatus> {
         let wait_for_persistence = wait_for_persistence.unwrap_or(true);
         let wait_for_caches = wait_for_caches.unwrap_or(true);
@@ -52,12 +49,7 @@ impl<Payload: PayloadTypes> RethEngineApiServer<Payload::ExecutionData> for Reth
 
         let (status, timings) = self
             .beacon_engine_handle
-            .reth_new_payload(
-                payload,
-                wait_for_persistence,
-                wait_for_caches,
-                block_access_list.map(Arc::new),
-            )
+            .reth_new_payload(payload, wait_for_persistence, wait_for_caches)
             .await
             .map_err(EngineApiError::from)?;
         Ok(RethPayloadStatus {

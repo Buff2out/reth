@@ -8404,7 +8404,6 @@ name = "reth-engine-primitives"
 version = "2.0.0"
 dependencies = [
  "alloy-consensus 2.0.0-rc.1",
- "alloy-eip7928",
  "alloy-eips 2.0.0-rc.1",
  "alloy-primitives",
  "alloy-rpc-types-engine",
@@ -10057,7 +10056,6 @@ dependencies = [
 name = "reth-rpc-engine-api"
 version = "2.0.0"
 dependencies = [
- "alloy-eip7928",
  "alloy-eips 2.0.0-rc.1",
  "alloy-primitives",
  "alloy-rlp",

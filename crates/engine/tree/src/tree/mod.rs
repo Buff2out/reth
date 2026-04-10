@@ -6,7 +6,6 @@ use crate::{
     tree::{error::InsertPayloadError, payload_validator::TreeCtx},
 };
 use alloy_consensus::BlockHeader;
-use alloy_eip7928::BlockAccessList;
 use alloy_eips::{eip1898::BlockWithParent, merge::EPOCH_SLOTS, BlockNumHash, NumHash};
 use alloy_primitives::B256;
 use alloy_rpc_types_engine::{
@@ -305,8 +304,6 @@ where
     /// Stored here (not in `ExecutedBlock`) to avoid leaking observability concerns into the block
     /// type. Entries are removed when blocks are persisted or invalidated.
     execution_timing_stats: HashMap<B256, Box<ExecutionTimingStats>>,
-    /// Out-of-band BALs for blocks currently buffered due to missing parent state.
-    buffered_block_access_lists: HashMap<B256, Arc<BlockAccessList>>,
     /// Task runtime for spawning blocking work on named, reusable threads.
     runtime: reth_tasks::Runtime,
 }
@@ -335,7 +332,6 @@ where
             .field("evm_config", &self.evm_config)
             .field("changeset_cache", &self.changeset_cache)
             .field("execution_timing_stats", &self.execution_timing_stats.len())
-            .field("buffered_block_access_lists", &self.buffered_block_access_lists.len())
             .field("runtime", &self.runtime)
             .finish()
     }
@@ -399,7 +395,6 @@ where
             evm_config,
             changeset_cache,
             execution_timing_stats: HashMap::new(),
-            buffered_block_access_lists: HashMap::new(),
             runtime,
         }
     }
@@ -701,7 +696,6 @@ where
     fn on_new_payload(
         &mut self,
         payload: T::ExecutionData,
-        block_access_list: Option<Arc<BlockAccessList>>,
     ) -> Result<TreeOutcome<PayloadStatus>, InsertBlockFatalError> {
         trace!(target: "engine::tree", "invoked new payload");
 
@@ -750,9 +744,9 @@ where
         self.metrics.block_validation.record_payload_validation(start.elapsed().as_secs_f64());
 
         let mut outcome = if self.backfill_sync_state.is_idle() {
-            self.try_insert_payload(payload, block_access_list)?.into_outcome()
+            self.try_insert_payload(payload)?.into_outcome()
         } else {
-            TreeOutcome::new(self.try_buffer_payload(payload, block_access_list)?)
+            TreeOutcome::new(self.try_buffer_payload(payload)?)
         };
 
         // if the block is valid and it is the current sync target head, make it canonical
@@ -776,14 +770,13 @@ where
     fn try_insert_payload(
         &mut self,
         payload: T::ExecutionData,
-        block_access_list: Option<Arc<BlockAccessList>>,
     ) -> Result<TryInsertPayloadResult, InsertBlockFatalError> {
         let block_hash = payload.block_hash();
         let num_hash = payload.num_hash();
         let parent_hash = payload.parent_hash();
         let mut latest_valid_hash = None;
 
-        match self.insert_payload(payload, block_access_list) {
+        match self.insert_payload(payload) {
             Ok(status) => {
                 let (status, already_seen) = match status {
                     InsertPayloadOk::Inserted(BlockStatus::Valid) => {
@@ -833,7 +826,6 @@ where
     fn try_buffer_payload(
         &mut self,
         payload: T::ExecutionData,
-        block_access_list: Option<Arc<BlockAccessList>>,
     ) -> Result<PayloadStatus, InsertBlockFatalError> {
         let parent_hash = payload.parent_hash();
         let num_hash = payload.num_hash();
@@ -841,7 +833,7 @@ where
         match self.payload_validator.convert_payload_to_block(payload) {
             // if the block is well-formed, buffer it for later
             Ok(block) => {
-                if let Err(error) = self.buffer_block(block, block_access_list) {
+                if let Err(error) = self.buffer_block(block) {
                     Ok(self.on_insert_block_error(error)?)
                 } else {
                     Ok(PayloadStatus::from_status(PayloadStatusEnum::Syncing))
@@ -1619,7 +1611,7 @@ where
                                 let start = Instant::now();
                                 let gas_used = payload.gas_used();
                                 let num_hash = payload.num_hash();
-                                let mut output = self.on_new_payload(payload, None);
+                                let mut output = self.on_new_payload(payload);
                                 self.metrics.engine.new_payload.update_response_metrics(
                                     start,
                                     &mut self.metrics.engine.forkchoice_updated.latest_finish_at,
@@ -1648,7 +1640,6 @@ where
                             }
                             BeaconEngineMessage::RethNewPayload {
                                 payload,
-                                block_access_list,
                                 wait_for_persistence,
                                 wait_for_caches,
                                 tx,
@@ -1700,7 +1691,7 @@ where
                                 let start = Instant::now();
                                 let gas_used = payload.gas_used();
                                 let num_hash = payload.num_hash();
-                                let mut output = self.on_new_payload(payload, block_access_list);
+                                let mut output = self.on_new_payload(payload);
                                 let latency = start.elapsed();
                                 self.metrics.engine.new_payload.update_response_metrics(
                                     start,
@@ -1813,7 +1804,6 @@ where
 
         // remove all buffered blocks below the backfill height
         self.state.buffer.remove_old_blocks(backfill_height);
-        self.sync_buffered_block_access_lists();
         self.purge_timing_stats(backfill_height, None);
         // we remove all entries because now we're synced to the backfill target and consider this
         // the canonical chain
@@ -2418,8 +2408,7 @@ where
         let block_count = blocks.len();
         for child in blocks {
             let child_num_hash = child.num_hash();
-            let block_access_list = self.buffered_block_access_lists.remove(&child_num_hash.hash);
-            match self.insert_block(child, block_access_list) {
+            match self.insert_block(child) {
                 Ok(res) => {
                     debug!(target: "engine::tree", child =?child_num_hash, ?res, "connected buffered block");
                     if self.is_any_sync_target(child_num_hash.hash) &&
@@ -2451,21 +2440,12 @@ where
     fn buffer_block(
         &mut self,
         block: SealedBlock<N::Block>,
-        block_access_list: Option<Arc<BlockAccessList>>,
     ) -> Result<(), InsertBlockError<N::Block>> {
         if let Err(err) = self.validate_block(&block) {
             return Err(InsertBlockError::consensus_error(err, block))
         }
-        if let Some(block_access_list) = block_access_list {
-            self.buffered_block_access_lists.insert(block.hash(), block_access_list);
-        }
         self.state.buffer.insert_block(block);
-        self.sync_buffered_block_access_lists();
         Ok(())
-    }
-
-    fn sync_buffered_block_access_lists(&mut self) {
-        self.buffered_block_access_lists.retain(|hash, _| self.state.buffer.block(hash).is_some());
     }
 
     /// Returns true if the distance from the local tip to the block is greater than the configured
@@ -2799,7 +2779,7 @@ where
         }
 
         // try to append the block
-        match self.insert_block(block, None) {
+        match self.insert_block(block) {
             Ok(InsertPayloadOk::Inserted(BlockStatus::Valid)) => {
                 return self.on_valid_downloaded_block(block_num_hash);
             }
@@ -2839,34 +2819,26 @@ where
     fn insert_payload(
         &mut self,
         payload: T::ExecutionData,
-        block_access_list: Option<Arc<BlockAccessList>>,
     ) -> Result<InsertPayloadOk, InsertPayloadError<N::Block>> {
         let block_with_parent = payload.block_with_parent();
         self.insert_block_or_payload(
             block_with_parent,
-            (payload, block_access_list),
-            |validator, (payload, block_access_list), ctx| {
-                validator.validate_payload(payload, ctx, block_access_list)
-            },
-            |this, (payload, block_access_list)| {
-                Ok((this.payload_validator.convert_payload_to_block(payload)?, block_access_list))
-            },
+            payload,
+            |validator, payload, ctx| validator.validate_payload(payload, ctx),
+            |this, payload| Ok(this.payload_validator.convert_payload_to_block(payload)?),
         )
     }
 
     fn insert_block(
         &mut self,
         block: SealedBlock<N::Block>,
-        block_access_list: Option<Arc<BlockAccessList>>,
     ) -> Result<InsertPayloadOk, InsertPayloadError<N::Block>> {
         let block_with_parent = block.block_with_parent();
         self.insert_block_or_payload(
             block_with_parent,
-            (block, block_access_list),
-            |validator, (block, block_access_list), ctx| {
-                validator.validate_block(block, ctx, block_access_list)
-            },
-            |_, (block, block_access_list)| Ok((block, block_access_list)),
+            block,
+            |validator, block, ctx| validator.validate_block(block, ctx),
+            |_, block| Ok(block),
         )
     }
 
@@ -2897,13 +2869,7 @@ where
             TreeCtx<'_, N>,
         )
             -> Result<(ExecutedBlock<N>, Option<Box<ExecutionTimingStats>>), Err>,
-        convert_to_block: impl FnOnce(
-            &mut Self,
-            Input,
-        ) -> Result<
-            (SealedBlock<N::Block>, Option<Arc<BlockAccessList>>),
-            Err,
-        >,
+        convert_to_block: impl FnOnce(&mut Self, Input) -> Result<SealedBlock<N::Block>, Err>,
     ) -> Result<InsertPayloadOk, Err>
     where
         Err: From<InsertBlockError<N::Block>>,
@@ -2923,7 +2889,7 @@ where
         if block_num_hash.number <= self.persistence_state.last_persisted_block.number {
             match self.provider.sealed_header_by_hash(block_num_hash.hash) {
                 Err(err) => {
-                    let (block, _) = convert_to_block(self, input)?;
+                    let block = convert_to_block(self, input)?;
                     return Err(InsertBlockError::new(block, err.into()).into());
                 }
                 Ok(Some(_)) => {
@@ -2937,11 +2903,11 @@ where
         // Ensure that the parent state is available.
         match self.state_provider_builder(block_id.parent) {
             Err(err) => {
-                let (block, _) = convert_to_block(self, input)?;
+                let block = convert_to_block(self, input)?;
                 return Err(InsertBlockError::new(block, err.into()).into());
             }
             Ok(None) => {
-                let (block, block_access_list) = convert_to_block(self, input)?;
+                let block = convert_to_block(self, input)?;
 
                 // we don't have the state required to execute this block, buffering it and find the
                 // missing parent block
@@ -2952,7 +2918,7 @@ where
                     .map(|block| block.parent_num_hash())
                     .unwrap_or_else(|| block.parent_num_hash());
 
-                self.buffer_block(block, block_access_list)?;
+                self.buffer_block(block)?;
 
                 return Ok(InsertPayloadOk::Inserted(BlockStatus::Disconnected {
                     head: self.state.tree_state.current_canonical_head,

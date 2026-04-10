@@ -1,7 +1,6 @@
 use crate::{
     error::BeaconForkChoiceUpdateError, BeaconOnNewPayloadError, ExecutionPayload, ForkchoiceStatus,
 };
-use alloy_eip7928::BlockAccessList;
 use alloy_rpc_types_engine::{
     ForkChoiceUpdateResult, ForkchoiceState, ForkchoiceUpdateError, ForkchoiceUpdated, PayloadId,
     PayloadStatus, PayloadStatusEnum,
@@ -16,10 +15,7 @@ use futures::{future::Either, FutureExt, TryFutureExt};
 use reth_errors::RethResult;
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_payload_primitives::PayloadTypes;
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 /// Type alias for backwards compat
@@ -210,8 +206,6 @@ pub enum BeaconEngineMessage<Payload: PayloadTypes> {
     RethNewPayload {
         /// The execution payload received by Engine API.
         payload: Payload::ExecutionData,
-        /// Optional block access list to use for BAL-aware execution paths.
-        block_access_list: Option<Arc<BlockAccessList>>,
         /// Whether to wait for in-flight persistence to complete before processing.
         wait_for_persistence: bool,
         /// Whether to wait for execution cache and sparse trie locks before processing.
@@ -309,12 +303,10 @@ where
         payload: Payload::ExecutionData,
         wait_for_persistence: bool,
         wait_for_caches: bool,
-        block_access_list: Option<Arc<BlockAccessList>>,
     ) -> Result<(PayloadStatus, NewPayloadTimings), BeaconOnNewPayloadError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.to_engine.send(BeaconEngineMessage::RethNewPayload {
             payload,
-            block_access_list,
             wait_for_persistence,
             wait_for_caches,
             tx,

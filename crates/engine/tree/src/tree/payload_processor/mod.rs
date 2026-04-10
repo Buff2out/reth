@@ -290,14 +290,13 @@ where
         env: ExecutionEnv<Evm>,
         transactions: I,
         provider_builder: StateProviderBuilder<N, P>,
-        bal: Option<Arc<BlockAccessList>>,
     ) -> IteratorPayloadHandle<Evm, I, N>
     where
         P: BlockReader + StateProviderFactory + StateReader + Clone + 'static,
     {
         let (prewarm_rx, execution_rx) =
             self.spawn_tx_iterator(transactions, env.transaction_count);
-        let prewarm_handle = self.spawn_caching_with(env, prewarm_rx, provider_builder, None, bal);
+        let prewarm_handle = self.spawn_caching_with(env, prewarm_rx, provider_builder, None, None);
         PayloadHandle {
             state_root_handle: None,
             install_state_hook: false,
@@ -451,12 +450,7 @@ where
     }
 
     /// Spawn prewarming optionally wired to the sparse trie task for target updates.
-    #[instrument(
-        level = "debug",
-        target = "engine::tree::payload_processor",
-        skip_all,
-        fields(bal=%bal.is_some())
-    )]
+    #[instrument(level = "debug", target = "engine::tree::payload_processor", skip_all)]
     fn spawn_caching_with<P>(
         &self,
         env: ExecutionEnv<Evm>,
@@ -498,10 +492,10 @@ where
         {
             let to_prewarm_task = to_prewarm_task.clone();
             self.executor.spawn_blocking_named("prewarm", move || {
-                let mode = if skip_prewarm {
-                    PrewarmMode::Skipped
-                } else if let Some(bal) = bal {
+                let mode = if let Some(bal) = bal {
                     PrewarmMode::BlockAccessList(bal)
+                } else if skip_prewarm {
+                    PrewarmMode::Skipped
                 } else {
                     PrewarmMode::Transactions(transactions)
                 };
