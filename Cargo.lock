@@ -10875,7 +10875,7 @@ dependencies = [
 [[package]]
 name = "revmc"
 version = "0.1.0"
-source = "git+https://github.com/paradigmxyz/revmc?branch=dani%2Fruntime#4f38983a1361b055d9ab38793b8694ed3e10d2eb"
+source = "git+https://github.com/paradigmxyz/revmc?branch=dani%2Fruntime#c3a7f348976bf3ba9efdf4414f5ca57861ced794"
 dependencies = [
  "alloy-evm",
  "alloy-primitives",
@@ -10911,7 +10911,7 @@ dependencies = [
 [[package]]
 name = "revmc-backend"
 version = "0.1.0"
-source = "git+https://github.com/paradigmxyz/revmc?branch=dani%2Fruntime#4f38983a1361b055d9ab38793b8694ed3e10d2eb"
+source = "git+https://github.com/paradigmxyz/revmc?branch=dani%2Fruntime#c3a7f348976bf3ba9efdf4414f5ca57861ced794"
 dependencies = [
  "eyre",
  "ruint",
@@ -10920,12 +10920,12 @@ dependencies = [
 [[package]]
 name = "revmc-build"
 version = "0.1.0"
-source = "git+https://github.com/paradigmxyz/revmc?branch=dani%2Fruntime#4f38983a1361b055d9ab38793b8694ed3e10d2eb"
+source = "git+https://github.com/paradigmxyz/revmc?branch=dani%2Fruntime#c3a7f348976bf3ba9efdf4414f5ca57861ced794"
 
 [[package]]
 name = "revmc-builtins"
 version = "0.1.0"
-source = "git+https://github.com/paradigmxyz/revmc?branch=dani%2Fruntime#4f38983a1361b055d9ab38793b8694ed3e10d2eb"
+source = "git+https://github.com/paradigmxyz/revmc?branch=dani%2Fruntime#c3a7f348976bf3ba9efdf4414f5ca57861ced794"
 dependencies = [
  "paste",
  "revm-bytecode",
@@ -10940,7 +10940,7 @@ dependencies = [
 [[package]]
 name = "revmc-context"
 version = "0.1.0"
-source = "git+https://github.com/paradigmxyz/revmc?branch=dani%2Fruntime#4f38983a1361b055d9ab38793b8694ed3e10d2eb"
+source = "git+https://github.com/paradigmxyz/revmc?branch=dani%2Fruntime#c3a7f348976bf3ba9efdf4414f5ca57861ced794"
 dependencies = [
  "revm-interpreter",
  "revm-primitives",
@@ -10950,7 +10950,7 @@ dependencies = [
 [[package]]
 name = "revmc-llvm"
 version = "0.1.0"
-source = "git+https://github.com/paradigmxyz/revmc?branch=dani%2Fruntime#4f38983a1361b055d9ab38793b8694ed3e10d2eb"
+source = "git+https://github.com/paradigmxyz/revmc?branch=dani%2Fruntime#c3a7f348976bf3ba9efdf4414f5ca57861ced794"
 dependencies = [
  "alloy-primitives",
  "cc",
