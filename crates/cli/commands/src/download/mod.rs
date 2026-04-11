@@ -59,10 +59,17 @@ pub(crate) enum SelectionPreset {
     Archive,
 }
 
+/// Overrides the default receipts retention used by `reth download --full`.
+///
+/// This lets the download command keep a wider receipts range while preserving
+/// the rest of the full preset's pruning behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FullReceiptsOverride {
+    /// Keep all available receipts.
     All,
+    /// Keep only the last `N` blocks of receipts.
     Distance(u64),
+    /// Keep all post-merge receipts by pruning everything before Paris.
     PreMerge,
 }
 
