@@ -50,6 +50,31 @@ if [ "$REMOTE_HASH" = "$LOCAL_HASH" ]; then
   exit 0
 fi
 
+# Check that the snapshot has enough headroom from the RPC chain tip.
+# The benchmark needs BENCH_WARMUP_BLOCKS + BENCH_BLOCKS blocks after
+# the snapshot block; if those blocks haven't been produced yet on the
+# RPC, downloading this snapshot would cause "Block not found" errors.
+SNAPSHOT_BLOCK=$(echo "$MANIFEST_CONTENT" | jq -r '.block // empty')
+HEADROOM="${BENCH_HEADROOM_BLOCKS:-3000}"
+RPC_URL="${BENCH_RPC_URL:-https://ethereum.reth.rs/rpc}"
+if [ -n "$SNAPSHOT_BLOCK" ]; then
+  RPC_HEAD_HEX=$(curl -sf "$RPC_URL" -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null \
+    | jq -r '.result // empty') || true
+  if [ -n "$RPC_HEAD_HEX" ]; then
+    RPC_HEAD=$(printf '%d' "$RPC_HEAD_HEX")
+    NEEDED=$((SNAPSHOT_BLOCK + HEADROOM))
+    if [ "$NEEDED" -gt "$RPC_HEAD" ]; then
+      echo "Snapshot too new: block ${SNAPSHOT_BLOCK} + ${HEADROOM} headroom = ${NEEDED} > RPC head ${RPC_HEAD}. Keeping current snapshot."
+      exit 0
+    fi
+    echo "Snapshot headroom OK: block ${SNAPSHOT_BLOCK} + ${HEADROOM} = ${NEEDED} <= RPC head ${RPC_HEAD}"
+  else
+    echo "::warning::Could not fetch RPC head block, skipping headroom check"
+  fi
+fi
+
 echo "Snapshot needs update (local: ${LOCAL_HASH:+${LOCAL_HASH:0:16}…}${LOCAL_HASH:-<none>}, remote: ${REMOTE_HASH:0:16}…)"
 if [ "${1:-}" = "--check" ]; then
   exit 10
