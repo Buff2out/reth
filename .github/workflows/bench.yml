@@ -571,6 +571,7 @@ jobs:
               body: buildBody('Building binaries...'),
             });
 
+      - uses: rui314/setup-mold@v1
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
         continue-on-error: true
