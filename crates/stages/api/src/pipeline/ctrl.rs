@@ -31,7 +31,7 @@ pub enum ControlFlow {
 impl ControlFlow {
     /// Whether the pipeline should continue executing stages.
     pub const fn should_continue(&self) -> bool {
-        matches!(self, Self::Continue { .. })
+        matches!(self, Self::Continue { .. } | Self::NoProgress { .. })
     }
 
     /// Returns true if the control flow is unwind.

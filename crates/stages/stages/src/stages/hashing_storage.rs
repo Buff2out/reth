@@ -10,7 +10,7 @@ use reth_db_api::{
 };
 use reth_etl::Collector;
 use reth_primitives_traits::StorageEntry;
-use reth_provider::{DBProvider, HashingWriter, StageCheckpointReader, StatsReader, StorageReader};
+use reth_provider::{DBProvider, HashingWriter, StatsReader, StorageReader};
 use reth_stages_api::{
     BlockRangeOutput, EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint,
     StageError, StageId, StorageHashingCheckpoint, UnwindInput, UnwindOutput,
@@ -79,8 +79,7 @@ where
         + StorageReader
         + HashingWriter
         + StatsReader
-        + StorageSettingsCache
-        + StageCheckpointReader,
+        + StorageSettingsCache,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -95,14 +94,9 @@ where
         }
 
         // If use_hashed_state is enabled, execution writes directly to `HashedStorages`,
-        // so this stage becomes a no-op. Use the Execution checkpoint as the effective target
-        // so that subsequent stages (Merkle) see the correct boundary.
+        // so this stage becomes a no-op.
         if provider.cached_storage_settings().use_hashed_state() {
-            let target = provider
-                .get_stage_checkpoint(StageId::Execution)?
-                .map(|cp| cp.block_number)
-                .unwrap_or_else(|| input.target());
-            return Ok(ExecOutput::done(input.checkpoint().with_block_number(target)));
+            return Ok(ExecOutput::done(input.checkpoint().with_block_number(input.target())));
         }
 
         // Use the total remaining range to decide clean vs incremental.

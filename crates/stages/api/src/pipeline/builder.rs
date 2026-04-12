@@ -11,8 +11,6 @@ pub struct PipelineBuilder<Provider> {
     stages: Vec<BoxedStage<Provider>>,
     /// The maximum block number to sync to.
     max_block: Option<BlockNumber>,
-    /// The maximum number of blocks to process per pipeline run loop iteration.
-    max_blocks_per_run: Option<BlockNumber>,
     /// A Sender for the current chain tip to sync to.
     tip_tx: Option<watch::Sender<B256>>,
     metrics_tx: Option<MetricEventsSender>,
@@ -51,12 +49,6 @@ impl<Provider> PipelineBuilder<Provider> {
         self
     }
 
-    /// Set the maximum number of blocks per pipeline run.
-    pub const fn with_max_blocks_per_run(mut self, n: BlockNumber) -> Self {
-        self.max_blocks_per_run = Some(n);
-        self
-    }
-
     /// Set the tip sender.
     pub fn with_tip_sender(mut self, tip_tx: watch::Sender<B256>) -> Self {
         self.tip_tx = Some(tip_tx);
@@ -85,13 +77,11 @@ impl<Provider> PipelineBuilder<Provider> {
         N: ProviderNodeTypes,
         ProviderFactory<N>: DatabaseProviderFactory<ProviderRW = Provider>,
     {
-        let Self { stages, max_block, max_blocks_per_run, tip_tx, metrics_tx, fail_on_unwind } =
-            self;
+        let Self { stages, max_block, tip_tx, metrics_tx, fail_on_unwind } = self;
         Pipeline {
             provider_factory,
             stages,
             max_block,
-            max_blocks_per_run,
             static_file_producer,
             tip_tx,
             event_sender: Default::default(),
@@ -109,7 +99,6 @@ impl<Provider> Default for PipelineBuilder<Provider> {
         Self {
             stages: Vec::new(),
             max_block: None,
-            max_blocks_per_run: None,
             tip_tx: None,
             metrics_tx: None,
             fail_on_unwind: false,
@@ -122,7 +111,6 @@ impl<Provider> std::fmt::Debug for PipelineBuilder<Provider> {
         f.debug_struct("PipelineBuilder")
             .field("stages", &self.stages.iter().map(|stage| stage.id()).collect::<Vec<StageId>>())
             .field("max_block", &self.max_block)
-            .field("max_blocks_per_run", &self.max_blocks_per_run)
             .field("fail_on_unwind", &self.fail_on_unwind)
             .finish()
     }

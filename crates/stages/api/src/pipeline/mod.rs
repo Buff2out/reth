@@ -73,8 +73,6 @@ pub struct Pipeline<N: ProviderNodeTypes> {
     stages: Vec<BoxedStage<<ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW>>,
     /// The maximum block number to sync to.
     max_block: Option<BlockNumber>,
-    /// The maximum number of blocks to process per pipeline run loop iteration.
-    max_blocks_per_run: Option<BlockNumber>,
     static_file_producer: StaticFileProducer<ProviderFactory<N>>,
     /// Sender for events the pipeline emits.
     event_sender: EventSender<PipelineEvent>,
@@ -173,26 +171,9 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 }
             }
 
-            // Loop until we reach max_block or encounter an error/unwind, mirroring
-            // the behavior of `run()`.
-            loop {
-                let result = self.run_loop().await;
-                trace!(target: "sync::pipeline", ?target, ?result, "Pipeline finished");
-                match &result {
-                    Ok(ctrl) if ctrl.should_continue() => {
-                        if self
-                            .progress
-                            .minimum_block_number
-                            .zip(self.max_block)
-                            .is_some_and(|(progress, target)| progress >= target)
-                        {
-                            return (self, result)
-                        }
-                        // Not at max_block yet, run another loop pass.
-                    }
-                    _ => return (self, result),
-                }
-            }
+            let result = self.run_loop().await;
+            trace!(target: "sync::pipeline", ?target, ?result, "Pipeline finished");
+            (self, result)
         })
     }
 
@@ -243,9 +224,6 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
         self.move_to_static_files()?;
 
         let mut previous_stage = None;
-        let mut pass_made_progress = false;
-        let mut last_block_number = None;
-
         for stage_index in 0..self.stages.len() {
             let stage = &self.stages[stage_index];
             let stage_id = stage.id();
@@ -258,15 +236,10 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
             match next {
                 ControlFlow::NoProgress { block_number } => {
                     if let Some(block_number) = block_number {
-                        last_block_number = Some(block_number);
                         self.progress.update(block_number);
                     }
                 }
-                ControlFlow::Continue { block_number } => {
-                    pass_made_progress = true;
-                    last_block_number = Some(block_number);
-                    self.progress.update(block_number);
-                }
+                ControlFlow::Continue { block_number } => self.progress.update(block_number),
                 ControlFlow::Unwind { target, bad_block } => {
                     self.unwind(target, Some(bad_block.block.number))?;
                     return Ok(ControlFlow::Unwind { target, bad_block })
@@ -282,11 +255,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
             );
         }
 
-        Ok(if pass_made_progress {
-            ControlFlow::Continue { block_number: last_block_number.unwrap_or_default() }
-        } else {
-            ControlFlow::NoProgress { block_number: last_block_number }
-        })
+        Ok(self.progress.next_ctrl())
     }
 
     /// Run [static file producer](StaticFileProducer) and [pruner](reth_prune::Pruner) to **move**
@@ -461,33 +430,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
 
         let stage_id = self.stage(stage_index).id();
         let mut made_progress = false;
-
-        // Re-fetch the previous stage's checkpoint to get the latest progress.
-        // This is critical when max_blocks_per_run is set, as previous stages may have
-        // advanced their checkpoint even if they didn't reach the full target.
-        let previous_stage = if stage_index > 0 {
-            let prev_stage_id = self.stage(stage_index - 1).id();
-            self.provider_factory.get_stage_checkpoint(prev_stage_id)?.map(|c| c.block_number)
-        } else {
-            previous_stage
-        };
-
-        // Use min(max_block, previous_stage) so that a stage never targets beyond what
-        // the previous stage has processed. This is needed when max_blocks_per_run causes
-        // the Execution stage to report completion early.
-        let target = match (self.max_block, previous_stage) {
-            (Some(max_block), Some(prev)) => Some(max_block.min(prev)),
-            (a, b) => a.or(b),
-        };
-
-        let target = if let Some(max_blocks_per_run) = self.max_blocks_per_run {
-            let current_checkpoint = self.provider_factory.get_stage_checkpoint(stage_id)?;
-            let current = current_checkpoint.map(|c| c.block_number).unwrap_or(0);
-            let capped = current + max_blocks_per_run;
-            Some(target.map_or(capped, |t| t.min(capped)))
-        } else {
-            target
-        };
+        let target = self.max_block.or(previous_stage);
 
         loop {
             let prev_checkpoint = self.provider_factory.get_stage_checkpoint(stage_id)?;
@@ -575,9 +518,8 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
 
                     let block_number = checkpoint.block_number;
                     let prev_block_number = prev_checkpoint.unwrap_or_default().block_number;
-                    let stage_made_progress = block_number != prev_block_number;
-                    made_progress |= stage_made_progress;
-                    if done || !stage_made_progress {
+                    made_progress |= block_number != prev_block_number;
+                    if done {
                         return Ok(if made_progress {
                             ControlFlow::Continue { block_number }
                         } else {
