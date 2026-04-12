@@ -1,5 +1,5 @@
 ARG RUST_TOOLCHAIN=1.89.0
-FROM docker.io/rust:$RUST_TOOLCHAIN-trixie AS builder
+FROM docker.io/rust:$RUST_TOOLCHAIN-bookworm AS builder
 
 ARG PROFILE
 ARG VERSION
@@ -11,7 +11,7 @@ RUN apt-get -o Acquire::Check-Valid-Until=false update && \
         libjemalloc-dev \
         libclang-dev \
         mold \
-        wget lsb-release software-properties-common gnupg && \
+        wget && \
     /tmp/install_llvm.sh && rm /tmp/install_llvm.sh
 WORKDIR /app
 COPY . .

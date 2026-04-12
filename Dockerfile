@@ -1,6 +1,6 @@
 # syntax=docker.io/docker/dockerfile:1.7-labs
 
-FROM lukemathwalker/cargo-chef:latest-rust-1.94 AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.94-bookworm AS chef
 WORKDIR /app
 
 LABEL org.opencontainers.image.source=https://github.com/paradigmxyz/reth
@@ -8,7 +8,7 @@ LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 # Install system dependencies
 COPY .github/scripts/install_llvm_ubuntu.sh /tmp/install_llvm.sh
-RUN apt-get update && apt-get install -y libclang-dev pkg-config wget lsb-release software-properties-common gnupg && \
+RUN apt-get update && apt-get install -y libclang-dev pkg-config wget && \
     /tmp/install_llvm.sh && rm /tmp/install_llvm.sh
 
 # Builds a cargo-chef plan
