@@ -13,7 +13,9 @@ use reth_ethereum_primitives::{EthPrimitives, TransactionSigned};
 use reth_evm::{
     eth::spec::EthExecutorSpec, ConfigureEvm, EvmFactory, EvmFactoryFor, NextBlockEnvAttributes,
 };
-use reth_evm_ethereum::factory::{JitBackend, RevmcMetrics, RuntimeConfig, RuntimeTuning};
+use reth_evm_ethereum::factory::{
+    JitBackend, RethEvmFactory, RevmcMetrics, RuntimeConfig, RuntimeTuning,
+};
 use reth_network::{primitives::BasicNetworkPrimitives, NetworkHandle, PeersInfo};
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, HeaderTy, NodeAddOns, NodePrimitives,
@@ -462,8 +464,7 @@ pub fn build_jit_evm_config<C: EthereumHardforks>(
     chain_spec: Arc<C>,
     jit: &JitArgs,
     dump_dir: Option<std::path::PathBuf>,
-) -> eyre::Result<(EthEvmConfig<C, reth_evm_ethereum::factory::RethEvmFactory>, Arc<RevmcMetrics>)>
-{
+) -> eyre::Result<(EthEvmConfig<C, RethEvmFactory>, Arc<RevmcMetrics>)> {
     let mut config = jit_runtime_config(jit);
     config.dump_dir = dump_dir;
 
@@ -485,7 +486,7 @@ pub fn build_jit_evm_config<C: EthereumHardforks>(
         );
     }
 
-    let factory = reth_evm_ethereum::factory::RethEvmFactory::new(backend);
+    let factory = RethEvmFactory::new(backend);
     let evm_config = EthEvmConfig::new_with_evm_factory(chain_spec, factory);
 
     Ok((evm_config, revmc_metrics))
@@ -493,11 +494,7 @@ pub fn build_jit_evm_config<C: EthereumHardforks>(
 
 /// A regular ethereum evm and executor builder.
 ///
-/// When `--jit` is passed, starts the revmc JIT backend and uses [`RethEvmFactory`] to
-/// serve compiled bytecode. Otherwise uses the default [`EthEvmFactory`].
-///
-/// [`RethEvmFactory`]: reth_evm_ethereum::factory::RethEvmFactory
-/// [`EthEvmFactory`]: alloy_evm::EthEvmFactory
+/// Uses [`RethEvmFactory`].
 #[derive(Debug, Default, Clone, Copy)]
 #[non_exhaustive]
 pub struct EthereumExecutorBuilder;
@@ -510,7 +507,7 @@ where
     >,
     Node: FullNodeTypes<Types = Types>,
 {
-    type EVM = EthEvmConfig<Types::ChainSpec, reth_evm_ethereum::factory::RethEvmFactory>;
+    type EVM = EthEvmConfig<Types::ChainSpec, RethEvmFactory>;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         let jit = &ctx.config().jit;

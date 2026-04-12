@@ -1,6 +1,6 @@
-//! revmc JIT compiler integration for EVM execution.
+//! revmc JIT compiler integration for EVM execution (requires `std`).
 //!
-//! Re-exports types from [`revmc::alloy_evm`] and provides [`RethEvmFactory`], a newtype that
+//! Re-exports types from `revmc::alloy_evm` and provides [`RethEvmFactory`], a newtype that
 //! implements [`Debug`].
 
 use alloy_evm::{Database, EvmEnv, EvmFactory};
@@ -11,8 +11,10 @@ use revm::{
     primitives::hardfork::SpecId,
     Inspector,
 };
+#[cfg(feature = "std")]
 use revmc::alloy_evm::JitEvmFactory;
 
+#[cfg(feature = "std")]
 pub use revmc::{
     runtime::{
         CompilationEvent, CompilationKind, JitBackend, RuntimeConfig, RuntimeStatsSnapshot,
@@ -21,20 +23,33 @@ pub use revmc::{
     CompileTimings,
 };
 
-/// Newtype around [`revmc::alloy_evm::JitEvmFactory`] that implements [`Debug`].
+#[cfg(feature = "std")]
+type Inner = JitEvmFactory;
+#[cfg(not(feature = "std"))]
+type Inner = alloy_evm::EthEvmFactory;
+
+/// Reth EVM factory.
 ///
-/// Owns the [`JitBackend`] to keep it alive for the factory's lifetime.
-#[derive(Clone)]
+/// Wraps [`JitEvmFactory`].
+#[derive(Clone, Debug)]
 pub struct RethEvmFactory {
-    inner: JitEvmFactory,
+    inner: Inner,
 }
 
-impl core::fmt::Debug for RethEvmFactory {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RethEvmFactory").finish_non_exhaustive()
+impl Default for RethEvmFactory {
+    fn default() -> Self {
+        #[cfg(feature = "std")]
+        {
+            Self::new(JitBackend::disabled())
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            Self { inner: Default::default() }
+        }
     }
 }
 
+#[cfg(feature = "std")]
 impl RethEvmFactory {
     /// Creates a new factory that owns the backend.
     pub const fn new(backend: JitBackend) -> Self {
@@ -42,12 +57,8 @@ impl RethEvmFactory {
     }
 
     /// Creates a [`RethEvmFactory`] with JIT disabled.
-    ///
-    /// Starts a backend with `enabled: false` so lookups always return `Interpret`.
     pub fn disabled() -> Self {
-        let backend = JitBackend::new(RuntimeConfig::default())
-            .expect("failed to start disabled revmc runtime");
-        Self::new(backend)
+        Self::default()
     }
 
     /// Returns a reference to the JIT backend.
@@ -58,14 +69,14 @@ impl RethEvmFactory {
 
 impl EvmFactory for RethEvmFactory {
     type Evm<DB: Database, I: Inspector<alloy_evm::eth::EthEvmContext<DB>>> =
-        <JitEvmFactory as EvmFactory>::Evm<DB, I>;
-    type Context<DB: Database> = <JitEvmFactory as EvmFactory>::Context<DB>;
-    type Tx = <JitEvmFactory as EvmFactory>::Tx;
+        <Inner as EvmFactory>::Evm<DB, I>;
+    type Context<DB: Database> = <Inner as EvmFactory>::Context<DB>;
+    type Tx = <Inner as EvmFactory>::Tx;
     type Error<DBError: core::error::Error + Send + Sync + 'static> = EVMError<DBError>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
     type BlockEnv = BlockEnv;
-    type Precompiles = <JitEvmFactory as EvmFactory>::Precompiles;
+    type Precompiles = <Inner as EvmFactory>::Precompiles;
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
         self.inner.create_evm(db, input)
@@ -82,6 +93,7 @@ impl EvmFactory for RethEvmFactory {
 }
 
 /// Prometheus metrics for revmc JIT runtime stats.
+#[cfg(feature = "std")]
 #[derive(reth_metrics::Metrics, Clone)]
 #[metrics(scope = "revmc.jit")]
 pub struct RevmcMetrics {
@@ -123,6 +135,7 @@ pub struct RevmcMetrics {
     pub jit_codegen_duration: metrics::Histogram,
 }
 
+#[cfg(feature = "std")]
 impl RevmcMetrics {
     /// Records a [`RuntimeStatsSnapshot`] into the metrics.
     pub fn record(&self, stats: &RuntimeStatsSnapshot) {
