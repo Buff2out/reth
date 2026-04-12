@@ -49,6 +49,11 @@ impl RethEvmFactory {
             .expect("failed to start disabled revmc runtime");
         Self::new(backend)
     }
+
+    /// Returns a reference to the JIT backend.
+    pub const fn backend(&self) -> &JitBackend {
+        self.inner.backend()
+    }
 }
 
 impl EvmFactory for RethEvmFactory {

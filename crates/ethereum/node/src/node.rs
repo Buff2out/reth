@@ -56,11 +56,7 @@ use reth_transaction_pool::{
     TransactionPool, TransactionValidationTaskExecutor,
 };
 use revm::context::TxEnv;
-use std::{
-    marker::PhantomData,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{marker::PhantomData, sync::Arc, time::SystemTime};
 
 pub use crate::{payload::EthereumPayloadBuilder, EthereumEngineValidator};
 
@@ -422,9 +418,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for EthereumNode {
 }
 
 /// Builds a [`RuntimeConfig`] from CLI [`JitArgs`].
-///
-/// This is the shared setup used by both `reth node` and `reth re-execute`.
-pub fn jit_runtime_config(jit: &JitArgs) -> RuntimeConfig {
+fn jit_runtime_config(jit: &JitArgs) -> RuntimeConfig {
     let default_tuning = RuntimeTuning::default();
     let tuning = RuntimeTuning {
         lookup_event_channel_capacity: jit.channel_capacity,
@@ -432,8 +426,7 @@ pub fn jit_runtime_config(jit: &JitArgs) -> RuntimeConfig {
         max_pending_jit_jobs: jit.max_pending_jobs,
         jit_worker_count: jit.worker_count.unwrap_or(default_tuning.jit_worker_count),
         resident_code_cache_bytes: jit.code_cache_bytes,
-        idle_evict_duration: (jit.idle_evict_secs > 0)
-            .then(|| Duration::from_secs(jit.idle_evict_secs)),
+        idle_evict_duration: jit.idle_evict_duration,
 
         shutdown_timeout: default_tuning.shutdown_timeout,
         jit_max_bytecode_len: default_tuning.jit_max_bytecode_len,
@@ -450,13 +443,52 @@ pub fn jit_runtime_config(jit: &JitArgs) -> RuntimeConfig {
         thread_name: default_config.thread_name,
         store: default_config.store,
         tuning,
-        dump_dir: None,
+        dump_dir: default_config.dump_dir,
         debug_assertions: jit.debug,
         blocking: jit.blocking,
-        no_dedup: false,
-        no_dse: false,
-        on_compilation: None,
+        no_dedup: default_config.no_dedup,
+        no_dse: default_config.no_dse,
+        on_compilation: default_config.on_compilation,
     }
+}
+
+/// Builds an [`EthEvmConfig`] with revmc JIT from CLI [`JitArgs`].
+///
+/// This is the shared setup used by both [`EthereumExecutorBuilder`] and `reth re-execute`.
+///
+/// Returns the evm config, the JIT backend (for periodic metrics polling), and the
+/// metrics recorder.
+pub fn build_jit_evm_config<C: EthereumHardforks>(
+    chain_spec: Arc<C>,
+    jit: &JitArgs,
+    dump_dir: Option<std::path::PathBuf>,
+) -> eyre::Result<(EthEvmConfig<C, reth_evm_ethereum::factory::RethEvmFactory>, Arc<RevmcMetrics>)>
+{
+    let mut config = jit_runtime_config(jit);
+    config.dump_dir = dump_dir;
+
+    let revmc_metrics = Arc::new(RevmcMetrics::default());
+    let compilation_metrics = revmc_metrics.clone();
+    config.on_compilation = Some(Arc::new(move |event| {
+        compilation_metrics.record_compilation(&event);
+    }));
+
+    let tuning = config.tuning;
+    let backend = JitBackend::new(config)?;
+
+    if jit.enabled || jit.blocking {
+        info!(target: "reth::cli",
+            hot_threshold = tuning.jit_hot_threshold,
+            workers = tuning.jit_worker_count,
+            blocking = jit.blocking,
+            "Started revmc JIT backend",
+        );
+    }
+
+    let factory = reth_evm_ethereum::factory::RethEvmFactory::new(backend.clone());
+    let evm_config = EthEvmConfig::new_with_evm_factory(chain_spec, factory);
+
+    Ok((evm_config, revmc_metrics))
 }
 
 /// A regular ethereum evm and executor builder.
@@ -482,31 +514,12 @@ where
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         let jit = &ctx.config().jit;
-        let mut config = jit_runtime_config(jit);
+        let dump_dir = jit.debug.then(|| ctx.config().datadir().data_dir().join("jit"));
 
-        // Node-specific: dump dir and compilation metrics.
-        config.dump_dir = jit.debug.then(|| ctx.config().datadir().data_dir().join("jit"));
-
-        let revmc_metrics = Arc::new(RevmcMetrics::default());
-        let compilation_metrics = revmc_metrics.clone();
-        config.on_compilation = Some(Arc::new(move |event| {
-            compilation_metrics.record_compilation(&event);
-        }));
-
-        let tuning = config.tuning;
-        let backend = JitBackend::new(config)?;
-
-        if jit.enabled || jit.blocking {
-            info!(target: "reth::cli",
-                hot_threshold = tuning.jit_hot_threshold,
-                workers = tuning.jit_worker_count,
-                blocking = jit.blocking,
-                "Started revmc JIT backend",
-            );
-        }
+        let (evm_config, revmc_metrics) = build_jit_evm_config(ctx.chain_spec(), jit, dump_dir)?;
 
         // Periodically record JIT metrics.
-        let metrics_backend = backend.clone();
+        let metrics_backend = evm_config.executor_factory.evm_factory().backend.clone();
         ctx.task_executor().spawn_with_graceful_shutdown_signal(|shutdown| async move {
             let mut shutdown = std::pin::pin!(shutdown);
             loop {
@@ -519,9 +532,7 @@ where
             }
         });
 
-        let factory = reth_evm_ethereum::factory::RethEvmFactory::new(backend);
-
-        Ok(EthEvmConfig::new_with_evm_factory(ctx.chain_spec(), factory))
+        Ok(evm_config)
     }
 }
 

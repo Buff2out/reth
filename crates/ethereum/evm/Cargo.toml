@@ -30,7 +30,7 @@ alloy-rpc-types-engine.workspace = true
 
 metrics.workspace = true
 reth-metrics.workspace = true
-revmc = { git = "https://github.com/paradigmxyz/revmc", branch = "dani/runtime", default-features = false, features = ["llvm", "alloy-evm"] }
+revmc = { workspace = true, features = ["llvm", "alloy-evm"] }
 
 [dev-dependencies]
 reth-testing-utils.workspace = true
