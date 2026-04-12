@@ -9,5 +9,8 @@ wget https://apt.llvm.org/llvm.sh -O "$llvm_sh"
 chmod +x "$llvm_sh"
 "$llvm_sh" "$v" all
 for bin in "${bins[@]}"; do
-    ln -fs "$(which "$bin-$v")" "/usr/bin/$bin"
+    ln -fs "/usr/bin/$bin-$v" "/usr/bin/$bin"
 done
+
+echo "LLVM $v installed:"
+llvm-config --version
