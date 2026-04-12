@@ -11,7 +11,7 @@ RUN apt-get -o Acquire::Check-Valid-Until=false update && \
         libjemalloc-dev \
         libclang-dev \
         mold \
-        lsb-release wget software-properties-common gnupg && \
+        wget && \
     /tmp/install_llvm.sh && rm /tmp/install_llvm.sh
 WORKDIR /app
 COPY . .
