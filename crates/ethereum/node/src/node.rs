@@ -423,13 +423,13 @@ fn jit_runtime_config(jit: &JitArgs) -> RuntimeConfig {
     let tuning = RuntimeTuning {
         lookup_event_channel_capacity: jit.channel_capacity,
         jit_hot_threshold: jit.hot_threshold,
+        jit_max_bytecode_len: jit.max_bytecode_len,
         max_pending_jit_jobs: jit.max_pending_jobs,
         jit_worker_count: jit.worker_count.unwrap_or(default_tuning.jit_worker_count),
         resident_code_cache_bytes: jit.code_cache_bytes,
         idle_evict_duration: Some(jit.idle_evict_duration),
 
         shutdown_timeout: default_tuning.shutdown_timeout,
-        jit_max_bytecode_len: default_tuning.jit_max_bytecode_len,
         jit_worker_queue_capacity: default_tuning.jit_worker_queue_capacity,
         jit_opt_level: default_tuning.jit_opt_level,
         aot_opt_level: default_tuning.aot_opt_level,
@@ -439,7 +439,7 @@ fn jit_runtime_config(jit: &JitArgs) -> RuntimeConfig {
 
     let default_config = RuntimeConfig::default();
     RuntimeConfig {
-        enabled: jit.enabled || jit.blocking,
+        enabled: jit.enabled,
         thread_name: default_config.thread_name,
         store: default_config.store,
         tuning,
@@ -519,7 +519,7 @@ where
         let (evm_config, revmc_metrics) = build_jit_evm_config(ctx.chain_spec(), jit, dump_dir)?;
 
         // Periodically record JIT metrics.
-        let metrics_backend = evm_config.executor_factory.evm_factory().backend.clone();
+        let metrics_backend = evm_config.executor_factory.evm_factory().backend().clone();
         ctx.task_executor().spawn_with_graceful_shutdown_signal(|shutdown| async move {
             let mut shutdown = std::pin::pin!(shutdown);
             loop {

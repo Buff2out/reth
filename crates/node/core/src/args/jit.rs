@@ -29,6 +29,12 @@ pub struct JitArgs {
     #[arg(long = "jit.max-pending-jobs", default_value_t = Self::DEFAULT_MAX_PENDING_JOBS, help_heading = "JIT")]
     pub max_pending_jobs: usize,
 
+    /// Maximum bytecode length eligible for JIT compilation.
+    /// Contracts with bytecode larger than this are never promoted to JIT.
+    /// 0 means no limit.
+    #[arg(long = "jit.max-bytecode-len", default_value_t = Self::DEFAULT_MAX_BYTECODE_LEN, help_heading = "JIT")]
+    pub max_bytecode_len: usize,
+
     /// Maximum total resident compiled code size in bytes.
     /// When exceeded, the backend evicts least-recently-used entries.
     /// 0 means no limit.
@@ -63,6 +69,7 @@ impl JitArgs {
     const DEFAULT_HOT_THRESHOLD: usize = 8;
     const DEFAULT_CHANNEL_CAPACITY: usize = 4096;
     const DEFAULT_MAX_PENDING_JOBS: usize = 2048;
+    const DEFAULT_MAX_BYTECODE_LEN: usize = 0;
     const DEFAULT_CODE_CACHE_BYTES: usize = 1024 * 1024 * 1024; // 1 GiB
     const DEFAULT_IDLE_EVICT_DURATION: Duration = Duration::from_hours(1);
 }
@@ -75,6 +82,7 @@ impl Default for JitArgs {
             worker_count: None,
             channel_capacity: Self::DEFAULT_CHANNEL_CAPACITY,
             max_pending_jobs: Self::DEFAULT_MAX_PENDING_JOBS,
+            max_bytecode_len: Self::DEFAULT_MAX_BYTECODE_LEN,
             code_cache_bytes: Self::DEFAULT_CODE_CACHE_BYTES,
             idle_evict_duration: Self::DEFAULT_IDLE_EVICT_DURATION,
             debug: false,
