@@ -12,7 +12,10 @@ WORKDIR /app
 LABEL org.opencontainers.image.source=https://github.com/paradigmxyz/reth
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
-RUN apt-get update && apt-get install -y libclang-dev pkg-config
+RUN apt-get update && apt-get install -y libclang-dev pkg-config lsb-release wget software-properties-common gnupg && \
+    wget https://apt.llvm.org/llvm.sh -O /tmp/llvm.sh && chmod +x /tmp/llvm.sh && /tmp/llvm.sh 22 all && \
+    for bin in clang llvm-config lld ld.lld FileCheck; do ln -fs "$(which "$bin-22")" "/usr/bin/$bin"; done && \
+    rm /tmp/llvm.sh
 
 # Install sccache for compilation caching
 RUN cargo install sccache --locked

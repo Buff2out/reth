@@ -39,6 +39,8 @@ jobs:
         with:
           cache-on-failure: true
 
+      - run: sudo .github/scripts/install_llvm_ubuntu.sh
+
       - name: Install dependencies
         run: |
           sudo apt-get update -qq

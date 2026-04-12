@@ -30,7 +30,7 @@ alloy-rpc-types-engine.workspace = true
 
 metrics.workspace = true
 reth-metrics.workspace = true
-revmc = { workspace = true, features = ["llvm", "alloy-evm"] }
+revmc = { workspace = true, features = ["alloy-evm"] }
 
 [dev-dependencies]
 reth-testing-utils.workspace = true

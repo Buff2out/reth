@@ -6,8 +6,11 @@ WORKDIR /app
 LABEL org.opencontainers.image.source=https://github.com/paradigmxyz/reth
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y libclang-dev pkg-config
+# Install system dependencies and LLVM 22 (required by revmc)
+RUN apt-get update && apt-get install -y libclang-dev pkg-config lsb-release wget software-properties-common gnupg && \
+    wget https://apt.llvm.org/llvm.sh -O /tmp/llvm.sh && chmod +x /tmp/llvm.sh && /tmp/llvm.sh 22 all && \
+    for bin in clang llvm-config lld ld.lld FileCheck; do ln -fs "$(which "$bin-22")" "/usr/bin/$bin"; done && \
+    rm /tmp/llvm.sh
 
 # Builds a cargo-chef plan
 FROM chef AS planner

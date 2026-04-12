@@ -21,6 +21,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - run: sudo .github/scripts/install_llvm_ubuntu.sh
+
       - name: Install bun
         uses: oven-sh/setup-bun@v2
         with:

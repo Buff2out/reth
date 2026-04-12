@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
+      - run: sudo .github/scripts/install_llvm_ubuntu.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: taiki-e/install-action@nextest
@@ -53,6 +54,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
+      - run: sudo .github/scripts/install_llvm_ubuntu.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: taiki-e/install-action@nextest

@@ -281,6 +281,8 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.9
         continue-on-error: true
 
+      - run: sudo .github/scripts/install_llvm_ubuntu.sh
+
       - name: Install dependencies
         env:
           DEREK_TOKEN: ${{ secrets.DEREK_TOKEN }}
