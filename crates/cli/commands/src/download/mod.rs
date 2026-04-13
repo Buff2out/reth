@@ -1047,8 +1047,8 @@ fn resolve_output_path(
     relative_path: &str,
     static_files_dir: Option<&Path>,
 ) -> PathBuf {
-    if let Some(sf_dir) = static_files_dir
-        && let Some(rest) = relative_path.strip_prefix(STATIC_FILES_PREFIX)
+    if let Some(sf_dir) = static_files_dir &&
+        let Some(rest) = relative_path.strip_prefix(STATIC_FILES_PREFIX)
     {
         return sf_dir.join(rest);
     }
