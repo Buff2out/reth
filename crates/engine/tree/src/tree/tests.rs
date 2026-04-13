@@ -1416,9 +1416,7 @@ fn test_state_root_strategy_paths() {
         .unwrap();
 
     assert!(
-        outcome1.outcome.is_valid() ||
-            outcome1.outcome.is_syncing() ||
-            outcome1.outcome.is_invalid(),
+        outcome1.outcome.is_valid() || outcome1.outcome.is_syncing(),
         "First strategy path should work"
     );
 
@@ -1439,10 +1437,7 @@ fn test_state_root_strategy_paths() {
         })
         .unwrap();
 
-    assert!(
-        outcome2.outcome.is_syncing() || outcome2.outcome.is_invalid(),
-        "Second strategy path should work"
-    );
+    assert!(outcome2.outcome.is_syncing(), "Second strategy path should work");
 
     // This test passes if multiple StateRootStrategy scenarios work correctly,
     // confirming that passing arguments directly doesn't break:
