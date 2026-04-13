@@ -440,7 +440,7 @@ impl ValidatorTestHarness {
             &mut self.harness.tree.state,
             &self.harness.tree.canonical_in_memory_state,
         );
-        let result = self.validator.validate_block(block, ctx, None);
+        let result = self.validator.validate_block(block, ctx);
         self.metrics.record_validation(result.is_ok());
         result
     }
@@ -628,10 +628,10 @@ fn test_disconnected_payload() {
 
     let outcome = test_harness
         .tree
-        .on_new_payload(
-            ExecutionData { payload: payload.into(), sidecar: ExecutionPayloadSidecar::none() },
-            None,
-        )
+        .on_new_payload(ExecutionData {
+            payload: payload.into(),
+            sidecar: ExecutionPayloadSidecar::none(),
+        })
         .unwrap();
     assert!(outcome.outcome.is_syncing());
 
@@ -649,7 +649,7 @@ fn test_disconnected_block() {
 
     let mut test_harness = TestHarness::new(HOLESKY.clone());
 
-    let outcome = test_harness.tree.insert_block(sealed.clone(), None).unwrap();
+    let outcome = test_harness.tree.insert_block(sealed.clone()).unwrap();
     assert_eq!(
         outcome,
         InsertPayloadOk::Inserted(BlockStatus::Disconnected {
@@ -1212,10 +1212,10 @@ fn test_on_new_payload_canonical_insertion() {
     // Case 1: Submit payload when NOT sync target head - should be syncing (disconnected)
     let outcome1 = test_harness
         .tree
-        .on_new_payload(
-            ExecutionData { payload: payload1.into(), sidecar: ExecutionPayloadSidecar::none() },
-            None,
-        )
+        .on_new_payload(ExecutionData {
+            payload: payload1.into(),
+            sidecar: ExecutionPayloadSidecar::none(),
+        })
         .unwrap();
 
     // Since this is disconnected from genesis, it should be syncing
@@ -1267,10 +1267,10 @@ fn test_on_new_payload_invalid_ancestor() {
     // Submit payload 2 (child of invalid block 1)
     let outcome = test_harness
         .tree
-        .on_new_payload(
-            ExecutionData { payload: payload2.into(), sidecar: ExecutionPayloadSidecar::none() },
-            None,
-        )
+        .on_new_payload(ExecutionData {
+            payload: payload2.into(),
+            sidecar: ExecutionPayloadSidecar::none(),
+        })
         .unwrap();
 
     // Verify response is INVALID
@@ -1314,10 +1314,10 @@ fn test_on_new_payload_backfill_buffering() {
     // Submit payload during backfill
     let outcome = test_harness
         .tree
-        .on_new_payload(
-            ExecutionData { payload: payload.into(), sidecar: ExecutionPayloadSidecar::none() },
-            None,
-        )
+        .on_new_payload(ExecutionData {
+            payload: payload.into(),
+            sidecar: ExecutionPayloadSidecar::none(),
+        })
         .unwrap();
 
     // Verify response is SYNCING
@@ -1360,10 +1360,10 @@ fn test_on_new_payload_malformed_payload() {
     // Submit the malformed payload
     let outcome = test_harness
         .tree
-        .on_new_payload(
-            ExecutionData { payload: payload.into(), sidecar: ExecutionPayloadSidecar::none() },
-            None,
-        )
+        .on_new_payload(ExecutionData {
+            payload: payload.into(),
+            sidecar: ExecutionPayloadSidecar::none(),
+        })
         .unwrap();
 
     // For malformed payloads with incorrect hash, the current implementation
@@ -1409,10 +1409,10 @@ fn test_state_root_strategy_paths() {
     // Scenario 1: Test one strategy path
     let outcome1 = test_harness
         .tree
-        .on_new_payload(
-            ExecutionData { payload: payload1.into(), sidecar: ExecutionPayloadSidecar::none() },
-            None,
-        )
+        .on_new_payload(ExecutionData {
+            payload: payload1.into(),
+            sidecar: ExecutionPayloadSidecar::none(),
+        })
         .unwrap();
 
     assert!(
@@ -1433,10 +1433,10 @@ fn test_state_root_strategy_paths() {
     // Scenario 2: Test different strategy path (disconnected)
     let outcome2 = test_harness
         .tree
-        .on_new_payload(
-            ExecutionData { payload: payload2.into(), sidecar: ExecutionPayloadSidecar::none() },
-            None,
-        )
+        .on_new_payload(ExecutionData {
+            payload: payload2.into(),
+            sidecar: ExecutionPayloadSidecar::none(),
+        })
         .unwrap();
 
     assert!(
@@ -1732,7 +1732,7 @@ mod payload_execution_tests {
         };
 
         // Test the function directly
-        let result = test_harness.tree.try_insert_payload(payload, None);
+        let result = test_harness.tree.try_insert_payload(payload);
         // Should handle the payload gracefully
         assert!(result.is_ok(), "Should handle valid payload without error");
     }
@@ -1748,7 +1748,7 @@ mod payload_execution_tests {
         let malformed_payload = create_malformed_payload();
 
         // Test buffering during backfill sync
-        let result = test_harness.tree.try_buffer_payload(malformed_payload, None);
+        let result = test_harness.tree.try_buffer_payload(malformed_payload);
         assert!(result.is_ok(), "Should handle malformed payload gracefully");
         let status = result.unwrap();
         assert!(
@@ -1774,7 +1774,7 @@ mod payload_execution_tests {
         };
 
         // Test buffering during backfill sync
-        let result = test_harness.tree.try_buffer_payload(payload, None);
+        let result = test_harness.tree.try_buffer_payload(payload);
         assert!(result.is_ok(), "Should handle valid payload gracefully");
         let status = result.unwrap();
         // The payload may be invalid due to missing withdrawals root, so accept either status

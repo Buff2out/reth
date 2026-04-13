@@ -7403,11 +7403,13 @@ name = "reth-bench"
 version = "2.0.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eip7928",
  "alloy-eips 2.0.0",
  "alloy-json-rpc",
  "alloy-primitives",
  "alloy-provider",
  "alloy-pubsub",
+ "alloy-rlp",
  "alloy-rpc-client",
  "alloy-rpc-types-engine",
  "alloy-transport",
