@@ -741,3 +741,16 @@ ipnet = "2.11"
 # alloy-evm = { git = "https://github.com/alloy-rs/evm", rev = "9bc2dba" }
 
 # revm-inspectors = { git = "https://github.com/paradigmxyz/revm-inspectors", rev = "3020ea8" }
+
+revm = { git = "https://github.com/pepyakin/revm", rev = "16f13970a6724183e91afd0be10d938eb9117691" }
+revm-bytecode = { git = "https://github.com/pepyakin/revm", rev = "16f13970a6724183e91afd0be10d938eb9117691" }
+revm-context = { git = "https://github.com/pepyakin/revm", rev = "16f13970a6724183e91afd0be10d938eb9117691" }
+revm-context-interface = { git = "https://github.com/pepyakin/revm", rev = "16f13970a6724183e91afd0be10d938eb9117691" }
+revm-database = { git = "https://github.com/pepyakin/revm", rev = "16f13970a6724183e91afd0be10d938eb9117691" }
+revm-database-interface = { git = "https://github.com/pepyakin/revm", rev = "16f13970a6724183e91afd0be10d938eb9117691" }
+revm-handler = { git = "https://github.com/pepyakin/revm", rev = "16f13970a6724183e91afd0be10d938eb9117691" }
+revm-inspector = { git = "https://github.com/pepyakin/revm", rev = "16f13970a6724183e91afd0be10d938eb9117691" }
+revm-interpreter = { git = "https://github.com/pepyakin/revm", rev = "16f13970a6724183e91afd0be10d938eb9117691" }
+revm-precompile = { git = "https://github.com/pepyakin/revm", rev = "16f13970a6724183e91afd0be10d938eb9117691" }
+revm-primitives = { git = "https://github.com/pepyakin/revm", rev = "16f13970a6724183e91afd0be10d938eb9117691" }
+revm-state = { git = "https://github.com/pepyakin/revm", rev = "16f13970a6724183e91afd0be10d938eb9117691" }
