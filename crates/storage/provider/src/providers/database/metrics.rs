@@ -199,6 +199,74 @@ impl DatabaseProviderMetrics {
         self.save_blocks_batch_size_last.set(timings.batch_size as f64);
     }
 
+    /// Records invalidation metrics for a `save_blocks` batch.
+    ///
+    /// For each block at a given depth (distance from the end of the batch),
+    /// records how many of its hashed keys and trie update keys are overwritten
+    /// by subsequent blocks in the same batch.
+    pub(crate) fn record_invalidation(
+        &self,
+        depth: usize,
+        hashed_accounts: u64,
+        hashed_storage_slots: u64,
+        account_trie_nodes: u64,
+        storage_trie_nodes: u64,
+    ) {
+        let depth_str = depth.to_string();
+        metrics::counter!(
+            "storage.providers.database.save_blocks.invalidated_hashed_accounts",
+            "depth" => depth_str.clone()
+        )
+        .increment(hashed_accounts);
+        metrics::counter!(
+            "storage.providers.database.save_blocks.invalidated_hashed_storage_slots",
+            "depth" => depth_str.clone()
+        )
+        .increment(hashed_storage_slots);
+        metrics::counter!(
+            "storage.providers.database.save_blocks.invalidated_account_trie_nodes",
+            "depth" => depth_str.clone()
+        )
+        .increment(account_trie_nodes);
+        metrics::counter!(
+            "storage.providers.database.save_blocks.invalidated_storage_trie_nodes",
+            "depth" => depth_str
+        )
+        .increment(storage_trie_nodes);
+    }
+
+    /// Records total key counts (non-invalidation) for a `save_blocks` batch per depth.
+    pub(crate) fn record_total_keys(
+        &self,
+        depth: usize,
+        hashed_accounts: u64,
+        hashed_storage_slots: u64,
+        account_trie_nodes: u64,
+        storage_trie_nodes: u64,
+    ) {
+        let depth_str = depth.to_string();
+        metrics::counter!(
+            "storage.providers.database.save_blocks.total_hashed_accounts",
+            "depth" => depth_str.clone()
+        )
+        .increment(hashed_accounts);
+        metrics::counter!(
+            "storage.providers.database.save_blocks.total_hashed_storage_slots",
+            "depth" => depth_str.clone()
+        )
+        .increment(hashed_storage_slots);
+        metrics::counter!(
+            "storage.providers.database.save_blocks.total_account_trie_nodes",
+            "depth" => depth_str.clone()
+        )
+        .increment(account_trie_nodes);
+        metrics::counter!(
+            "storage.providers.database.save_blocks.total_storage_trie_nodes",
+            "depth" => depth_str
+        )
+        .increment(storage_trie_nodes);
+    }
+
     /// Records all commit timings.
     pub(crate) fn record_commit(&self, timings: &CommitTimings) {
         self.save_blocks_commit_mdbx.record(timings.mdbx);

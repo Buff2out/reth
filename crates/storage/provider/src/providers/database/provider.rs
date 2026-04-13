@@ -27,7 +27,7 @@ use alloy_consensus::{
 use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{
     keccak256,
-    map::{hash_map, AddressSet, B256Map, HashMap},
+    map::{hash_map, AddressSet, B256Map, B256Set, HashMap, HashSet},
     Address, BlockHash, BlockNumber, TxHash, TxNumber, B256,
 };
 use itertools::Itertools;
@@ -67,7 +67,7 @@ use reth_storage_api::{
 use reth_storage_errors::provider::{ProviderResult, StaticFileWriterError};
 use reth_trie::{
     updates::{StorageTrieUpdatesSorted, TrieUpdatesSorted},
-    HashedPostStateSorted,
+    HashedPostStateSorted, Nibbles,
 };
 use reth_trie_db::{ChangesetCache, DatabaseStorageTrieCursor, TrieTableAdapter};
 use revm_database::states::{
@@ -727,6 +727,127 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
                     self.write_trie_updates_sorted(&merged_trie)?;
                 }
                 timings.write_trie_updates += start.elapsed();
+
+                // Compute per-depth invalidation metrics.
+                //
+                // For each block at position i in the batch, "depth" is the distance
+                // from the end (depth = N - 1 - i). We count how many of block i's
+                // hashed keys and trie nodes also appear in any subsequent block j > i,
+                // meaning they would be overwritten during the flatten/merge.
+                {
+                    let n = blocks.len();
+
+                    // Suffix sets accumulate keys from all blocks newer than the
+                    // current one. For the newest block the suffix is empty.
+                    let mut suffix_account_keys = B256Set::default();
+                    let mut suffix_storage_keys: B256Map<B256Set> = B256Map::default();
+                    let mut suffix_wiped_storage = B256Set::default();
+                    let mut suffix_account_trie: HashSet<Nibbles> = HashSet::default();
+                    let mut suffix_storage_trie: B256Map<HashSet<Nibbles>> = B256Map::default();
+                    let mut suffix_deleted_storage_tries = B256Set::default();
+
+                    // Iterate newest-to-oldest. For each block we first count
+                    // invalidations against the suffix, then add the block's own
+                    // keys into the suffix for older blocks.
+                    for i in (0..n).rev() {
+                        let cur_hashed = blocks[i].hashed_state();
+                        let cur_trie = blocks[i].trie_updates();
+                        let depth = n - 1 - i;
+
+                        // --- count invalidations against the suffix ---
+
+                        let mut inv_accounts = 0u64;
+                        let total_accounts = cur_hashed.accounts().len() as u64;
+                        for (addr, _) in cur_hashed.accounts() {
+                            if suffix_account_keys.contains(addr) {
+                                inv_accounts += 1;
+                            }
+                        }
+
+                        let mut inv_storage = 0u64;
+                        let mut total_storage = 0u64;
+                        for (addr, storage) in cur_hashed.account_storages() {
+                            let slots = storage.storage_slots_ref();
+                            total_storage += slots.len() as u64;
+                            if suffix_wiped_storage.contains(addr) {
+                                // A later block wiped this address's storage entirely
+                                inv_storage += slots.len() as u64;
+                            } else if let Some(suffix_slots) = suffix_storage_keys.get(addr) {
+                                for (slot, _) in slots {
+                                    if suffix_slots.contains(slot) {
+                                        inv_storage += 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut inv_acct_trie = 0u64;
+                        let total_acct_trie = cur_trie.account_nodes_ref().len() as u64;
+                        for (nibbles, _) in cur_trie.account_nodes_ref() {
+                            if suffix_account_trie.contains(nibbles) {
+                                inv_acct_trie += 1;
+                            }
+                        }
+
+                        let mut inv_stor_trie = 0u64;
+                        let mut total_stor_trie = 0u64;
+                        for (addr, storage_trie) in cur_trie.storage_tries_ref() {
+                            let nodes = storage_trie.storage_nodes_ref();
+                            total_stor_trie += nodes.len() as u64;
+                            if suffix_deleted_storage_tries.contains(addr) {
+                                inv_stor_trie += nodes.len() as u64;
+                            } else if let Some(suffix_nodes) = suffix_storage_trie.get(addr) {
+                                for (nibbles, _) in nodes {
+                                    if suffix_nodes.contains(nibbles) {
+                                        inv_stor_trie += 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        self.metrics.record_invalidation(
+                            depth,
+                            inv_accounts,
+                            inv_storage,
+                            inv_acct_trie,
+                            inv_stor_trie,
+                        );
+                        self.metrics.record_total_keys(
+                            depth,
+                            total_accounts,
+                            total_storage,
+                            total_acct_trie,
+                            total_stor_trie,
+                        );
+
+                        // --- add current block's keys into the suffix ---
+
+                        for (addr, _) in cur_hashed.accounts() {
+                            suffix_account_keys.insert(*addr);
+                        }
+                        for (addr, storage) in cur_hashed.account_storages() {
+                            if storage.is_wiped() {
+                                suffix_wiped_storage.insert(*addr);
+                            }
+                            let entry = suffix_storage_keys.entry(*addr).or_default();
+                            for (slot, _) in storage.storage_slots_ref() {
+                                entry.insert(*slot);
+                            }
+                        }
+                        for (nibbles, _) in cur_trie.account_nodes_ref() {
+                            suffix_account_trie.insert(*nibbles);
+                        }
+                        for (addr, storage_trie) in cur_trie.storage_tries_ref() {
+                            if storage_trie.is_deleted() {
+                                suffix_deleted_storage_tries.insert(*addr);
+                            }
+                            let entry = suffix_storage_trie.entry(*addr).or_default();
+                            for (nibbles, _) in storage_trie.storage_nodes_ref() {
+                                entry.insert(*nibbles);
+                            }
+                        }
+                    }
+                }
             }
 
             // Full mode: update history indices
