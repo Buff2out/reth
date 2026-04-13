@@ -872,7 +872,13 @@ jobs:
         run: |
           sudo systemctl stop "$RETH_SCOPE" 2>/dev/null || true
           sudo systemctl reset-failed "$RETH_SCOPE" 2>/dev/null || true
-          sudo schelk recover -y --kill || sudo schelk full-recover -y || true
+          if mountpoint -q "$SCHELK_MOUNT"; then
+            sudo schelk recover -y --kill || sudo schelk full-recover -y || true
+          # After a runner reboot, schelk's state may still say the volume is mounted
+          # even though the dm-era device and filesystem mount are gone.
+          elif sudo jq -e '.is_mounted == true' /var/lib/schelk/state.json >/dev/null 2>&1; then
+            sudo schelk full-recover -y || true
+          fi
           rm -rf "$BENCH_WORK_DIR"
           mkdir -p "$BENCH_WORK_DIR"
 
