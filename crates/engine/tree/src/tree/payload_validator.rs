@@ -513,7 +513,9 @@ where
         let block_access_list = ensure_ok!(input
             .block_access_list()
             .transpose()
-            .map_err(Box::<dyn std::error::Error + Send + Sync>::from));
+            // Eventually gets converted to a `InsertBlockErrorKind::Other`
+            .map_err(Box::<dyn std::error::Error + Send + Sync>::from))
+        .map(Arc::new);
 
         // Create lazy overlay from ancestors - this doesn't block, allowing execution to start
         // before the trie data is ready. The overlay will be computed on first access.
@@ -533,7 +535,7 @@ where
             provider_builder,
             overlay_factory.clone(),
             strategy,
-            block_access_list.map(Arc::new),
+            block_access_list,
         ));
 
         // Create optional cache stats for detailed block logging
@@ -1470,8 +1472,12 @@ where
             }
             StateRootStrategy::Parallel | StateRootStrategy::Synchronous => {
                 let start = Instant::now();
-                let handle =
-                    self.payload_processor.spawn_cache_exclusive(env, txs, provider_builder);
+                let handle = self.payload_processor.spawn_cache_exclusive(
+                    env,
+                    txs,
+                    provider_builder,
+                    block_access_list,
+                );
 
                 // Record prewarming initialization duration
                 self.metrics
