@@ -7,7 +7,7 @@
 # Environment:
 #   DRY_RUN=true  - Skip actual verification, just print what would be checked.
 
-set -euxo pipefail
+set -euo pipefail
 
 TARGETS="${1:-}"
 REGISTRY="${2:-}"

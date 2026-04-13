@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -uxo pipefail
+set -uo pipefail
 
 crates_to_check=(
     reth-network-peers

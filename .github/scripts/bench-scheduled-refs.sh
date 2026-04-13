@@ -32,7 +32,7 @@
 #   state/release-last-feature-ref  (release, from decofe/reth-bench-charts repo)
 #
 # Requires: gh (GitHub CLI), jq, date, git (hourly mode), curl, DEREK_TOKEN env
-set -euxo pipefail
+set -euo pipefail
 
 FORCE="${1:-false}"
 MODE="${2:-nightly}"
