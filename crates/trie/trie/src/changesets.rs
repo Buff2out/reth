@@ -89,6 +89,36 @@ where
     Ok(TrieUpdatesSorted::new(account_nodes, storage_tries))
 }
 
+/// Computes trie changesets for a sorted sequence of updated node paths using a single forward
+/// cursor walk.
+fn compute_sorted_changesets<C, T>(
+    cursor: &mut C,
+    sorted_updates: &[(Nibbles, T)],
+) -> ChangesetResult<Vec<(Nibbles, Option<BranchNodeCompact>)>>
+where
+    C: TrieCursor,
+{
+    let mut changesets = Vec::with_capacity(sorted_updates.len());
+    let Some((first_path, _)) = sorted_updates.first() else {
+        return Ok(changesets);
+    };
+
+    let mut current = cursor.seek(*first_path)?;
+
+    for (path, _) in sorted_updates {
+        while current.as_ref().is_some_and(|(current_path, _)| current_path < path) {
+            current = cursor.next()?;
+        }
+
+        let old_node = current.as_ref().and_then(|(current_path, node)| {
+            (current_path == path).then(|| node.clone())
+        });
+        changesets.push((*path, old_node));
+    }
+
+    Ok(changesets)
+}
+
 /// Computes account trie changesets.
 ///
 /// Looks up the current value for each changed account node path and returns
@@ -102,16 +132,7 @@ where
     Factory: TrieCursorFactory,
 {
     let mut cursor = factory.account_trie_cursor()?;
-    let mut account_changesets = Vec::with_capacity(trie_updates.account_nodes_ref().len());
-
-    // For each changed account node, look up its current value
-    // The input is already sorted, so the output will be sorted
-    for (path, _new_node) in trie_updates.account_nodes_ref() {
-        let old_node = cursor.seek_exact(*path)?.map(|(_path, node)| node);
-        account_changesets.push((*path, old_node));
-    }
-
-    Ok(account_changesets)
+    compute_sorted_changesets(&mut cursor, trie_updates.account_nodes_ref())
 }
 
 /// Computes storage trie changesets for a single account.
@@ -129,16 +150,7 @@ fn compute_storage_changesets(
     cursor: &mut impl TrieStorageCursor,
     storage_updates: &StorageTrieUpdatesSorted,
 ) -> ChangesetResult<Vec<(Nibbles, Option<BranchNodeCompact>)>> {
-    let mut storage_changesets = Vec::with_capacity(storage_updates.storage_nodes.len());
-
-    // For each changed storage node, look up its current value
-    // The input is already sorted, so the output will be sorted
-    for (path, _new_node) in &storage_updates.storage_nodes {
-        let old_node = cursor.seek_exact(*path)?.map(|(_path, node)| node);
-        storage_changesets.push((*path, old_node));
-    }
-
-    Ok(storage_changesets)
+    compute_sorted_changesets(cursor, storage_updates.storage_nodes_ref())
 }
 
 /// Handles wiped storage trie changeset computation.
