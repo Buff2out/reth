@@ -10701,7 +10701,7 @@ dependencies = [
  "dashmap",
  "derive_more",
  "either",
- "indexmap 2.13.1",
+ "indexmap 2.14.0",
  "libloading 0.9.0",
  "oxc_index",
  "quanta",
