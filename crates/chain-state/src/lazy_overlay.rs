@@ -129,10 +129,22 @@ impl LazyOverlay {
             return TrieInputSorted::default();
         }
 
-        let state =
-            HashedPostStateSorted::merge_batch(blocks.iter().map(|b| b.wait_cloned().hashed_state));
-        let nodes =
-            TrieUpdatesSorted::merge_batch(blocks.iter().map(|b| b.wait_cloned().trie_updates));
+        let computed: Vec<_> = blocks.iter().map(DeferredTrieData::wait_cloned).collect();
+
+        if let [block] = computed.as_slice() {
+            return TrieInputSorted {
+                state: Arc::clone(&block.hashed_state),
+                nodes: Arc::clone(&block.trie_updates),
+                prefix_sets: Default::default(),
+            }
+        }
+
+        let state = HashedPostStateSorted::merge_batch(
+            computed.iter().map(|block| Arc::clone(&block.hashed_state)),
+        );
+        let nodes = TrieUpdatesSorted::merge_batch(
+            computed.iter().map(|block| Arc::clone(&block.trie_updates)),
+        );
 
         TrieInputSorted { state, nodes, prefix_sets: Default::default() }
     }
