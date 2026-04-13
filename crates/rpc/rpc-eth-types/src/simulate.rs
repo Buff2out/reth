@@ -6,7 +6,7 @@ use crate::{
 };
 use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction as _};
 use alloy_eips::eip2718::WithEncoded;
-use alloy_evm::precompiles::PrecompilesMap;
+use alloy_evm::{block::TxResult, precompiles::PrecompilesMap};
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
 use alloy_rpc_types_eth::{
     simulate::{SimCallResult, SimulateError, SimulatedBlock},
@@ -198,8 +198,9 @@ where
         // The effect for a layer-2 execution client is that it does not charge L1 cost.
         let tx = WithEncoded::new(Default::default(), tx);
 
-        builder
-            .execute_transaction_with_result_closure(tx, |result| results.push(result.clone()))?;
+        builder.execute_transaction_with_result_closure(tx, |result| {
+            results.push(result.result().result.clone())
+        })?;
     }
 
     // Pass noop provider to skip state root calculations.
